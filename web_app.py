@@ -137,6 +137,37 @@ async def stats():
 
 
 # ─── LLAMA-SERVER (8080) ───────────────────────────────────────────────────────
+# ─── LLM MODEL SELECTION (local llama / remote solar) ─────────────────────────
+MODEL_CONFIG_FILE = STACK_DIR / "llm_model.yaml"
+
+def _load_model_config():
+    if MODEL_CONFIG_FILE.exists():
+        try:
+            return yaml.safe_load(MODEL_CONFIG_FILE.read_text()) or {}
+        except Exception:
+            pass
+    return {"model": "llama"}
+
+def _save_model_config(cfg):
+    MODEL_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    MODEL_CONFIG_FILE.write_text(yaml.safe_dump(cfg, default_flow_style=False), encoding='utf-8')
+
+@app.get("/api/llm/model")
+async def llm_model_get():
+    """Get selected LLM model (local llama-server or remote solar)."""
+    return {"model": _load_model_config().get("model", "llama"), "config": _load_model_config()}
+
+@app.post("/api/llm/model")
+async def llm_model_set(req: Request):
+    """Set selected LLM model (local llama-server or remote solar)."""
+    data = await req.json()
+    model = data.get("model", "llama")
+    cfg = _load_model_config()
+    cfg["model"] = model
+    _save_model_config(cfg)
+    return {"ok": True, "model": model, "config": cfg}
+
+# ─── LLAMA-SERVER (8080) ───────────────────────────────────────────────────────
 @app.post("/api/llama/chat")
 async def llm_chat(req: Request):
     data = await req.json()
@@ -144,21 +175,55 @@ async def llm_chat(req: Request):
     prompt = data.get("prompt")
     if messages is None:
         messages = [{"role": "user", "content": (prompt or "").strip()}]
-    model = data.get("model") or str(MODELS_DIR / "Qwen3.8-27B-IQ3_XS-3.01bpw.gguf")
-    payload = {
-        "model": model,
-        "messages": messages,
-        "temperature": data.get("temperature", 0.7),
-    }
-    try:
-        async with httpx.AsyncClient(timeout=180.0) as client:
-            r = await client.post("http://127.0.0.1:8080/v1/chat/completions",
-                                 json=payload, headers={"Content-Type": "application/json"})
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=502)
-    if r.status_code != 200:
-        return JSONResponse({"error": r.text, "status": r.status_code}, status_code=502)
-    return r.json()
+    model = data.get("model")
+    if not model:
+        # Use the configured model selection
+        model_cfg = _load_model_config()
+        model = model_cfg.get("model", "llama")
+    if model == "solar":
+        # Remote Nous AI Solar Mini 4 (free) via Nous research API
+        solar_base_url = os.environ.get("SOLAR_BASE_URL", "https://inference-api.nousresearch.com/v1")
+        solar_key = os.environ.get("SOLAR_API_KEY", "")
+        solar_payload = {
+            "model": "upstage/solar-mini4:free",
+            "messages": messages,
+            "temperature": data.get("temperature", 0.7),
+            "max_tokens": data.get("max_tokens", 2048),
+        }
+        try:
+            headers = {"Content-Type": "application/json"}
+            if solar_key:
+                headers["x-api-key"] = solar_key
+            async with httpx.AsyncClient(timeout=180.0) as client:
+                r = await client.post(
+                    f"{solar_base_url}/chat/completions",
+                    json=solar_payload,
+                    headers=headers,
+                )
+        except Exception as e:
+            return JSONResponse({"error": f"solar: {str(e)}"}, status_code=502)
+        if r.status_code != 200:
+            body = r.text[:200] if r.text else ""
+            return JSONResponse({"error": f"solar HTTP {r.status_code}: {body}"}, status_code=502)
+        return r.json()
+    else:
+        # Local llama-server
+        if not model:
+            model = str(MODELS_DIR / "Qwen3.8-27B-IQ3_XS-3.01bpw.gguf")
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": data.get("temperature", 0.7),
+        }
+        try:
+            async with httpx.AsyncClient(timeout=180.0) as client:
+                r = await client.post("http://127.0.0.1:8080/v1/chat/completions",
+                                     json=payload, headers={"Content-Type": "application/json"})
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=502)
+        if r.status_code != 200:
+            return JSONResponse({"error": r.text, "status": r.status_code}, status_code=502)
+        return r.json()
 
 
 # ─── HERMES (CLI) ──────────────────────────────────────────────────────────────

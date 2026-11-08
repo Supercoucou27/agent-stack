@@ -124,8 +124,18 @@
     <section class="panel">
       <h2>LLM Direct (local)</h2>
       <div style="display:flex; gap:6px; margin-bottom:6px;">
-        <textarea id="chat-input" rows="2" placeholder="Message pour le LLM local…" style="flex:1; font-family:ui-monospace,monospace; font-size:11.5px;"></textarea>
+        <textarea id="chat-input" rows="2" placeholder="Message pour l'agent..." style="flex:1; font-family:ui-monospace,monospace; font-size:11.5px;"></textarea>
         <button onclick="sendChat()" style="padding:6px 10px;">Envoyer</button>
+      </div>
+      <div style="display:flex; gap:6px; margin-bottom:6px; align-items:center;">
+        <span style="font-size:11px; color:var(--muted);">LLM :</span>
+        <span id="llm-model-label" style="font-size:11px; color:#7ee787; font-weight:500;">LLM: Local llama (Qwen3.8-27B)</span>
+        <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);">
+          <input type="radio" name="llm-model" value="llama" checked onchange="saveLlmModel()"> Local llama
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);">
+          <input type="radio" name="llm-model" value="solar" onchange="saveLlmModel()"> Solar Mini 4 (free)
+        </label>
       </div>
       <div id="chat-log" style="font-family:ui-monospace,monospace; font-size:11px; white-space:pre-wrap; color:#7ee787; min-height:48px;"></div>
     </section>
@@ -395,6 +405,38 @@ async function switchModel() {
   setTimeout(() => { loadModels(); ping(); }, 3500);
 }
 
+// ─── LLM MODEL (solar vs llama) ─────────────────────────────────────────────────
+async function saveLlmModel() {
+  const model = $('llm-model').value;
+  try {
+    const res = await fetch('/api/llm/model', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({model: model})
+    });
+    const d = await res.json();
+    if (d.ok) {
+      const label = $('llm-model-label');
+      if (model === 'solar') {
+        $('chat-input').placeholder = 'Message pour Solar Mini 4 (free)...';
+        label.textContent = 'LLM: Solar Mini 4 (remote)';
+        label.className = 'badge ok';
+        label.style.color = '#f85149';
+      } else {
+        $('chat-input').placeholder = 'Message pour le LLM local…';
+        label.textContent = 'LLM: Local llama (Qwen3.8-27B)';
+        label.className = 'badge info';
+        label.style.color = '#7ee787';
+      }
+      const badge = $('badge-llama');
+      badge.textContent = label.textContent;
+      setTimeout(() => { loadModels(); }, 2000);
+    }
+  } catch(e) {
+    alert('Erreur: ' + e);
+  }
+}
+
 // ─── CHAT ────────────────────────────────────────────────────────────────────
 async function sendChat() {
   const input = $('chat-input');
@@ -402,12 +444,16 @@ async function sendChat() {
   if (!msg) return;
   input.value = '';
   const out = $('chat-log');
-  out.textContent = '⏳ Attente du LLM local…\n\n';
+  out.textContent = '⏳ Attente de l\'agent LLM…\n\n';
   try {
     const res = await fetch('/api/llama/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({prompt: msg, temperature: parseFloat($('cfg-temp').value) || 0.7})
+      body: JSON.stringify({
+        prompt: msg,
+        temperature: parseFloat($('cfg-temp').value) || 0.7,
+        model: $('llm-model').value
+      })
     });
     const data = await res.json();
     if (data.error) {
