@@ -200,13 +200,6 @@ curl -X POST http://127.0.0.1:8082/api/mcp/reload
 | `/api/hermes/send` | POST | Send message to Hermes terminal |
 | `/api/hermes/status` | GET | Hermes status |
 | `/api/hermes/yolo` | GET/POST | Yolo mode |
-| `/api/hermes/guardrail` | GET/POST | Guardrail toggle |
-| `/api/ollama/status` | GET | Ollama status |
-| `/api/ollama/start` | POST | Start Ollama |
-| `/api/ollama/stop` | POST | Stop Ollama |
-| `/api/ollama/restart` | POST | Restart Ollama |
-| `/api/ollama/check-sudo` | GET | Check sudo access |
-| `/api/cluster/run` | POST | Run cluster job |
 | `/api/cluster/status` | GET | Cluster status |
 | `/api/mcp` | GET | List MCP servers |
 | `/api/mcp/add` | POST | Add MCP server |
