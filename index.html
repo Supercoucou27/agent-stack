@@ -21,8 +21,8 @@
   .badge.err { background: #da363322; color: #f85149; border: 1px solid #da363366; }
   .badge.info { background: #1a1d27; color: #93c6f4; border: 1px solid #2d3342; }
 
-  main { flex: 1; display: grid; grid-template-columns: 400px 1fr; overflow: hidden; }
-  aside { border-right: 1px solid var(--border); background: var(--card); overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+  main { flex: 1; display: grid; grid-template-columns: 340px 1fr; grid-template-rows: 1fr; overflow: hidden; }
+  aside { border-right: 1px solid var(--border); background: var(--card); overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; min-width: 280px; max-width: 440px; flex: 0 0 auto; }
   section.panel { border: 1px solid var(--border); border-radius: 6px; padding: 10px; background: #0e121a; }
   section.panel h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px; }
   .stat-row { display: flex; justify-content: space-between; font-size: 11.5px; margin-bottom: 3px; }
@@ -41,7 +41,7 @@
   .file-list { max-height: 120px; overflow-y: auto; font-family: var(--mono); font-size: 11px; background: #080a0f; border: 1px solid var(--border); border-radius: 4px; padding: 4px; }
   .file-item { padding: 3px 6px; border-bottom: 1px solid #1a202c; display: flex; justify-content: space-between; }
 
-  #workspace { display: flex; flex-direction: column; height: 100%; overflow: hidden; padding: 12px; gap: 8px; }
+  #workspace { display: flex; flex-direction: column; height: 100%; overflow: hidden; padding: 12px; gap: 8px; /* Use flex: 1 for the terminal area */ }
   #task-input { height: 110px; font-size: 12.5px; line-height: 1.4; }
   #console-output { flex: 1; background: #05070a; border: 1px solid var(--border); border-radius: 5px; padding: 12px; font-family: var(--mono); font-size: 11.5px; color: #7ee787; overflow-y: auto; white-space: pre-wrap; line-height: 1.45; }
   #log-output { height: 110px; background: #05070a; border: 1px solid var(--border); border-radius: 4px; padding: 8px; font-family: var(--mono); font-size: 11px; color: #8b949e; overflow-y: auto; white-space: pre-wrap; margin-top: 4px; }
@@ -109,21 +109,23 @@
     <section class="panel">
       <h2>Host Hardware</h2>
       <div class="stat-row"><span>CPU Core Load</span><span id="txt-cpu">--%</span></div>
-      <progress id="bar-cpu" max="100" value="0"></progress>
+      <progress id="bar-cpu" class="flex:1" max="100" value="0"></progress>
+
       <div class="stat-row"><span>Host RAM</span><span id="txt-ram">-- / -- GB</span></div>
-      <progress id="bar-ram" max="100" value="0"></progress>
+      <progress id="bar-ram" class="flex:1" max="100" value="0"></progress>
+
       <div class="stat-row"><span>Workspace Disk</span><span id="txt-disk">--%</span></div>
-      <progress id="bar-disk" max="100" value="0"></progress>
+      <progress id="bar-disk" class="flex:1" max="100" value="0"></progress>
     </section>
 
     <!-- 4. LLM Direct chat -->
     <section class="panel">
       <h2>LLM Direct (local)</h2>
       <div style="display:flex; gap:6px; margin-bottom:6px;">
-        <textarea id="chat-input" rows="2" placeholder="Message pour l'agent..." style="flex:1; font-family:ui-monospace,monospace; font-size:11.5px;"></textarea>
+        <textarea id="chat-input" rows="2" placeholder="Message pour l'agent..." style="flex:1; min-height:60px; font-family:ui-monospace,monospace; font-size:11.5px;"></textarea>
         <button onclick="sendChat()" style="padding:6px 10px;">Envoyer</button>
       </div>
-      <div style="display:flex; gap:6px; margin-bottom:6px; align-items:center;">
+      <div style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:6px; align-items:center;">
         <span style="font-size:11px; color:var(--muted);">LLM :</span>
         <span id="llm-model-label" style="font-size:11px; color:var(--muted); font-weight:500;">LLM: Local llama (Qwen3.8-27B)</span>
         <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);">
@@ -133,7 +135,7 @@
           <input type="radio" name="llm-model" id="llm-model-solar" value="solar" onchange="saveLlmModel()"> Solar Mini 4 (free)
         </label>
       </div>
-      <div id="chat-log" style="font-family:ui-monospace,monospace; font-size:11px; white-space:pre-wrap; color:#7ee787; min-height:48px;"></div>
+      <div id="chat-log" style="font-family:ui-monospace,monospace; font-size:11px; white-space:pre-wrap; color:#7ee787; flex:1; min-height:48px; overflow-y:auto;"></div>
     </section>
 
 
