@@ -107,7 +107,13 @@ class MCPManager:
     """Manages MCP server lifecycle inside Hermes agent with performance optimizations."""
 
     def __init__(self, config_path: Path = None):
-        self.config_path = config_path or (Path.home() / '.hermes' / 'mcp_config.json')
+                # Official Hermes Agent MCP config uses YAML at ~/.hermes/config.yaml
+        # Look for existing config first
+        hermes_config = Path.home() / '.hermes' / 'config.yaml'
+        if hermes_config.exists():
+            self.config_path = hermes_config
+        else:
+            self.config_path = config_path or (Path.home() / '.hermes' / 'mcp_config.json')
         self.sessions = {}
         self._exit_stack = None
         self.tools = []
@@ -117,15 +123,37 @@ class MCPManager:
         self._cache_ttl = 300  # seconds
 
     def _load_config(self) -> dict:
-        """Load MCP server configuration from JSON file."""
+        """Load MCP server configuration.
+
+        Supports multiple formats:
+        1. Official Hermes config.yaml (~/.hermes/config.yaml) with mcp_servers key
+        2. JSON file with mcpServers key (legacy)
+        """
         if not self.config_path.exists():
             return {}
+
         try:
-            with open(self.config_path, 'r') as f:
-                return json.load(f).get('mcpServers', {})
+            raw = self.config_path.read_text(encoding='utf-8')
+            # Try YAML first (official Hermes config format)
+            try:
+                import yaml
+                config = yaml.safe_load(raw) or {}
+                if isinstance(config, dict) and 'mcp_servers' in config:
+                    # Official format: mcp_servers: { name: { command, args, env } }
+                    raw_config = config.get('mcp_servers', {})
+                    if isinstance(raw_config, dict):
+                        return raw_config
+            except ImportError:
+                pass
+
+            # Fallback: JSON format
+            if self.config_path.suffix.lower() == '.json':
+                data = json.loads(raw)
+                if isinstance(data, dict) and 'mcpServers' in data:
+                    return data.get('mcpServers', {})
         except Exception as e:
             logger.warning(f'[MCP] Failed to load config: {e}')
-            return {}
+        return {}
 
     def _load_config_from_env(self) -> dict:
         """Load MCP config if specified via HERMES_MCP_CONFIG env var."""
@@ -1360,8 +1388,69 @@ def _mcp_save(servers):
     subprocess.run(['hermes', 'reload-mcp'], capture_output=True)
 
 
-@app.get("/api/mcp")
-async def mcp_list():
+# ─── MCP RELOAD & TEST ENDPOINTS ───────────────────────────────────────────────
+@app.get("/api/mcp/test/{server_name}")
+async def mcp_test(server_name: str):
+    """Test a specific MCP server connection."""
+    if not mcp_managers:
+        return JSONResponse({"error": "MCP not available"}, status_code=503)
+    
+    manager = mcp_managers[0]  # In-memory only
+    try:
+        # Check if already connected
+        if server_name in manager.sessions:
+            return {"ok": True, "server": server_name, "connected": True}
+        
+        # Try to reload
+        await manager._discover_tools()
+        if server_name in manager.sessions:
+            return {"ok": True, "server": server_name, "connected": True, "tools": len(manager.sessions[server_name].tools)}
+        return {"ok": False, "server": server_name, "connected": False, "error": "server not found"}
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+@app.post("/api/mcp/reload")
+async def mcp_reload(req: Request):
+    """Reload all MCP servers (new config or re-discover tools)."""
+    global mcp_managers
+    if not mcp_managers:
+        return JSONResponse({"error": "MCP not available"}, status_code=503)
+    
+    old_managers = mcp_managers.copy()
+    mcp_managers = []
+    
+    for old_mgr in old_managers:
+        try:
+            # Close old sessions
+            await old_mgr.close()
+        except Exception:
+            pass
+    
+    try:
+        new_manager = MCPManager()
+        await new_manager.initialize()
+        mcp_managers.append(new_manager)
+        logger.info(f'[MCP] Reloaded {len(mcp_managers)} server(s)')
+        return {"ok": True, "servers": len(mcp_managers)}
+    except Exception as e:
+        mcp_managers = old_managers
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+@app.get("/api/mcp/test")
+async def mcp_health():
+    """Health check for MCP subsystem."""
+    if not mcp_managers:
+        return JSONResponse({"status": "not_initialized"})
+    
+    results = []
+    for i, mgr in enumerate(mcp_managers):
+        results.append({
+            "id": i,
+            "connected": len(mgr.sessions) > 0,
+            "servers": list(mgr.sessions.keys()),
+            "tools": len(mgr.tools)
+        })
+    return {"status": "ok", "results": results}
     return {"servers": _mcp_load()}
 
 

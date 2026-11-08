@@ -99,7 +99,31 @@
 - Add new MCP servers (stdio or HTTP transport)
 - Remove MCP servers
 - Toggle enable/disable
-- Reload MCP config
+- Reload MCP config (`/api/mcp/reload`)
+- Test individual server (`/api/mcp/test/{server}`)
+- **Official config:** Uses `~/.hermes/config.yaml` (YAML format)
+
+**Config example (official format):**
+```yaml
+mcp_servers:
+  filesystem:
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/projects"]
+    env:
+      READ_ONLY: "true"
+
+  git:
+    command: "uvx"
+    args: ["mcp-server-git"]
+    env:
+      GIT_WORK_TREE: "/home/user/myrepo"
+
+  # Remote HTTP MCP server
+  my_api:
+    command: "npx"
+    args: ["-y", "@my-org/mcp-server"]
+    url: "https://api.example.com/mcp"
+```
 
 ### 📊 LLM Model Selection
 - Switch between local llama-server and remote Solar Mini 4 (free)
@@ -165,6 +189,8 @@ sudo systemctl start agent-web
 - GPU with ≥ 8 GB VRAM
 
 **Dependencies:** `chromadb==0.4.23`, `requests==2.31.0`, `python-dotenv==1.0.0`, `mcp`, `pynvml`, `psutil`.
+
+**Note:** MCP support is included in the standard Hermes Agent install. For npm-based servers, ensure Node.js and `npx` are available. For Python MCP servers, `uvx` is recommended.
 
 **Note:** CrewAI has been removed. The official Hermes Agent installer (`hermes-agent.nousresearch.com`) provides the agent runtime.
 
