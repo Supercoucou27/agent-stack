@@ -21,11 +21,54 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 import httpx
 import psutil
 
-app = FastAPI(title="Unified LLM, Hermes & Cluster Deck")
+app = FastAPI(title="Unified LLM, Hermes & Terminal Deck")
 STACK_DIR = Path(__file__).parent.resolve()
 WORKSPACE = Path(os.environ.get("AGENT_WORKSPACE", Path.home() / "agent-workspace")).resolve()
 MODELS_DIR = STACK_DIR / "models"
 GATEWAY_SOCK = Path(os.environ.get("HERMES_GATEWAY_SOCK", "/home/tara/.hermes/gateway.sock"))
+HERMES_SESSION = os.environ.get("HERMES_SESSION", "hermes_agent")
+
+# ─── HERMES UTILITY ─────────────────────────────────────────────────────────────
+def find_hermes_bin():
+    candidates = [
+        shutil.which("hermes"),
+        Path.home() / ".hermes" / "bin" / "hermes",
+        Path("/home/tara/agent-stack/venv/bin/hermes"),
+        Path("/home/tara/.hermes/hermes-agent/venv/bin/hermes"),
+    ]
+    for c in candidates:
+        p = Path(c)
+        if p.is_file() and os.access(p, os.X_OK):
+            return str(p)
+    return str(Path(candidates[0]))
+
+
+def ensure_hermes_config():
+    """Crée un fichier de config minimal si absent."""
+    cfg_path = Path.home() / ".hermes" / "config.yaml"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    if not cfg_path.exists():
+        cfg_path.write_text(
+            "model:\n"
+            "  default: llama\n"
+            "  base_url: http://127.0.0.1:8080\n\n"
+            "agent:\n"
+            "  max_turns: 50\n"
+            "  system_prompt: You are an autonomous systems engineering assistant.\n"
+            "  context_length: 131072\n\n"
+            "terminal:\n"
+            "  backend: websocket\n\n"
+            "approvals:\n"
+            "  mode: smart\n"
+            "tools:\n"
+            "  auto_approve_threshold: low\n"
+            "  execute_code: false\n\n"
+            "security:\n"
+            "  redact_secrets: true\n"
+            "  redact_pii: true\n",
+            encoding="utf-8"
+        )
+    return cfg_path
 
 
 def get_cpu_ram():
@@ -92,14 +135,135 @@ def get_storage():
         return {}
 
 
+def get_cpu_temp():
+    """Retourne la température CPU en °C si disponible."""
+    try:
+        if os.path.exists("/sys/class/thermal/thermal_zone0/temp"):
+            with open("/sys/class/thermal/thermal_zone0/temp") as f:
+                return round(int(f.read().strip()) / 1000, 1)
+    except Exception:
+        pass
+    try:
+        import psutil
+        for t in psutil.sensors_temperatures():
+            for entry in t.entries:
+                if entry.label == "Tdie" and entry.current is not None:
+                    return round(entry.current / 1000, 1)
+    except Exception:
+        pass
+    return None
+
+
+def get_cpu_core_usage():
+    """Retourne l'utilisation par cœur CPU (si matériel disponible)."""
+    try:
+        cores = psutil.cpu_percent(interval=0.3, percpu=True)
+        return {"cores": len(cores), "usage": [round(c, 1) for c in cores]}
+    except Exception:
+        return {"cores": 0, "usage": []}
+
+
+def get_network_io():
+    """Retourne I/O réseau depuis psutil (delta auto-géré)."""
+    try:
+        net = psutil.net_io_counters()
+        return {"bytes_sent": net.bytes_sent, "bytes_recv": net.bytes_recv,
+                "packets_sent": net.packets_sent, "packets_recv": net.packets_recv}
+    except Exception:
+        return {}
+
+
+def get_disk_io():
+    """Retourne I/O disque depuis psutil (delta auto-géré)."""
+    try:
+        dsk = psutil.disk_io_counters()
+        return {"read_bytes": dsk.read_bytes if dsk else 0,
+                "write_bytes": dsk.write_bytes if dsk else 0}
+    except Exception:
+        return {}
+
+
+def get_process_metrics():
+    """Retourne les métriques des processus (llama-server, hermes)."""
+    procs = {}
+    try:
+        import psutil
+        for p in psutil.process_iter(["pid", "name", "memory_info", "create_time", "cmdline"]):
+            try:
+                name = p.info["name"] or "unknown"
+                mem = p.info["memory_info"]
+                if name in ("llama-server", "llama", "hermes", "node", "python"):
+                    if name not in procs:
+                        procs[name] = []
+                    procs[name].append({
+                        "pid": p.info["pid"],
+                        "mem_mb": round(mem.rss / 1024 / 1024, 1) if mem else 0,
+                        "create_time": p.info["create_time"],
+                        "cmd": p.info["cmdline"][:4] if p.info["cmdline"] else ""
+                    })
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+    except Exception:
+        pass
+    return procs
+
+
 def get_stats():
+    gpus = []
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        for i in range(pynvml.nvmlDeviceGetCount()):
+            h = pynvml.nvmlDeviceGetHandleByIndex(i)
+            name = pynvml.nvmlDeviceGetName(h)
+            if isinstance(name, bytes):
+                name = name.decode()
+            mem = pynvml.nvmlDeviceGetMemoryInfo(h)
+            util = pynvml.nvmlDeviceGetUtilizationRates(h)
+            power = pynvml.nvmlDeviceGetPowerUsage(h)
+            temps = {}
+            for ttype in (pynvml.NVML_TEMPERATURE_GPU,
+                          pynvml.NVML_TEMPERATURE_MEMORY,
+                          pynvml.NVML_TEMPERATURE_ENCODER,
+                          pynvml.NVML_TEMPERATURE_DECODER):
+                try:
+                    temps[pynvml.nvmlTemperatureTypeToString(ttype)] = \
+                        pynvml.nvmlDeviceGetTemperature(h, ttype)
+                except Exception:
+                    pass
+            try:
+                power_state = pynvml.nvmlDeviceGetPowerManagementLimit(h)
+                power_actual = pynvml.nvmlDeviceGetPowerManagementCounter(h)
+                power_percent = (power_actual / power_state) * 100 if power_state and power_actual else None
+            except Exception:
+                power_percent = None
+            gpus.append({"index": i, "name": name,
+                         "vram_used_mb": round(mem.used / 1024 / 1024),
+                         "vram_total_mb": round(mem.total / 1024 / 1024),
+                         "vram_free_mb": round(mem.free / 1024 / 1024),
+                         "utilization": {"gpu": util.gpu, "memory": util.memory},
+                         "power_watts": round(power / 1000, 1),
+                         "power_percent": round(power_percent, 1) if power_percent is not None else None,
+                         "temps": temps})
+    except Exception:
+        pass
     return {
-        "cpu_percent": round(psutil.cpu_percent(interval=0.3), 1),
+        "cpu": {
+            "percent": round(psutil.cpu_percent(interval=0.3), 1),
+            "cores": psutil.cpu_count(logical=True),
+            "physical_cores": psutil.cpu_count(logical=False),
+            "temperature": get_cpu_temp(),
+        },
+        "cpu_cores": get_cpu_core_usage(),
         "ram": {"total_gb": round(psutil.virtual_memory().total / 1e9, 1),
                 "used_gb": round(psutil.virtual_memory().used / 1e9, 1),
-                "percent": psutil.virtual_memory().percent},
-        "gpus": get_gpus(),
+                "percent": psutil.virtual_memory().percent,
+                "available_gb": round(psutil.virtual_memory().available / 1e9, 1)},
+        "gpus": gpus,
         "storage": get_storage(),
+        "network": get_network_io(),
+        "disk_io": get_disk_io(),
+        "processes": get_process_metrics(),
     }
 
 
@@ -455,479 +619,6 @@ async def list_files():
     return {"files": items[:250]}
 
 
-# ─── CLUSTER (5001) — 6 workers ───────────────────────────────────────────────
-CLUSTER_PLAN_RE = re.compile(r"^\s*(\d+)\s*[\\.)\-:]+\s*(.+?)\s*$")
-CLUSTER_STATE = {
-    "status": "idle", "objective": "", "start_time": 0.0, "total_time": 0.0,
-    "workers": {f"worker_{i+1}": {"task": "", "result": "", "latency_sec": 0.0, "done": False, "status": "pending"} for i in range(6)},
-    "report": "", "error": "", "logs_inspected": 0, "system_alerts": [],
-}
-MAX_CONCURRENCY_ = 6
-WORKER_TIMEOUT_ = 180
-CHEF_TIMEOUT_ = 240
-WORKER_MAX_TOKENS_ = 1024
-SUMMARY_MAX_TOKENS_ = 3072
-CHEF_MODEL_ = os.getenv("CHEF_MODEL", "lfm3-omni:2b")
-WORKER_MODEL_ = os.getenv("WORKER_MODEL", "lfm3:1.7b")
-OLLAMA_URL_ = os.getenv("OLLAMA_URL", "http://localhost:11434/v1")
-OLLAMA_BASE_ = OLLAMA_URL_.replace("/v1", "")
-WORKER_TIMEOUT_ = float(os.getenv("WORKER_TIMEOUT", "180"))
-CHEF_TIMEOUT_ = float(os.getenv("CHEF_TIMEOUT", "240"))
-MAX_CONCURRENCY_ = int(os.getenv("MAX_CONCURRENCY", "6"))
-WORKER_MAX_TOKENS_ = int(os.getenv("WORKER_MAX_TOKENS", "1024"))
-SUMMARY_MAX_TOKENS_ = int(os.getenv("SUMMARY_MAX_TOKENS", "3072"))
-HERMES_MODEL_ = os.getenv("HERMES_MODEL", "lfm3-omni:2b")
-HERMES_SESSION = "cluster_hermes"
-CFG_PATH = Path.home() / ".hermes/config.yaml"
-
-_client = httpx.AsyncClient(base_url=OLLAMA_URL_, timeout=240.0)
-
-
-def _cluster_plan(objective: str):
-    plan = (
-        "Tu es le coordinateur principal d'un cluster d'agents.\n"
-        f"Décompose cet objectif en exactement 6 sous-tâches atomiques distinctes :\n"
-        f'"{objective}"\n\n'
-        "Format strict :\n"
-        "1. <tâche 1>\n2. <tâche 2>\n3. <tâche 3>\n4. <tâche 4>\n5. <tâche 5>\n6. <tâche 6>\n"
-    )
-    return plan
-
-
-def _cluster_state():
-    return CLUSTER_STATE
-
-
-@app.get("/api/cluster/status")
-async def cluster_status():
-    return JSONResponse(CLUSTER_STATE)
-
-
-@app.post("/api/cluster/run")
-async def api_run(req: Request):
-    data = await req.json()
-    objective = (data or {}).get("objective", "").strip() or \
-                "Audit de sécurité et d'intégrité d'un serveur Linux local exposé sur un réseau local"
-    if CLUSTER_STATE["status"] in ("planning", "workers", "synthesizing"):
-        return JSONResponse({"ok": False, "error": "Un cluster est déjà en cours."}, status_code=409)
-    import threading
-    threading.Thread(target=_start_thread, args=(objective,), daemon=True).start()
-    return {"ok": True, "status": "started", "objective": objective}
-
-
-async def _run_worker_task(wid, subtask):
-    t0 = time.perf_counter()
-    CLUSTER_STATE["workers"][f"worker_{wid}"]["task"] = subtask
-    CLUSTER_STATE["workers"][f"worker_{wid}"]["status"] = "running"
-    prompt = (
-        f"Tu es le sous-agent d'exécution #{wid}. Tâche atomique : '{subtask}'. "
-        "Réponds en 5 puces maximum, chacune ≤ 25 mots, format :\n"
-        "- Constat : …\n- Risque : …\n- Action : …\n"
-        "Pas de préambule, pas de conclusion."
-    )
-    try:
-        r = await _client.post("/v1/chat/completions", json={
-            "model": WORKER_MODEL_, "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.1, "max_tokens": WORKER_MAX_TOKENS_})
-        data = r.json()
-        output = data["choices"][0]["message"]["content"].strip()
-        if data["choices"][0]["finish_reason"] == "length":
-            output += " […tronqué]"
-        status = "ok"
-    except Exception as e:
-        output = f"Erreur: {type(e).__name__}: {e}"
-        status = "error"
-    el = time.perf_counter() - t0
-    CLUSTER_STATE["workers"][f"worker_{wid}"]["result"] = output
-    CLUSTER_STATE["workers"][f"worker_{wid}"]["latency_sec"] = round(el, 2)
-    CLUSTER_STATE["workers"][f"worker_{wid}"]["done"] = True
-    CLUSTER_STATE["workers"][f"worker_{wid}"]["status"] = status
-    CLUSTER_STATE["logs_inspected"] += 1
-    if status == "error":
-        CLUSTER_STATE["system_alerts"].append(f"worker_{wid} en erreur")
-
-async def _orchestrate(objective: str):
-    CLUSTER_STATE.update({
-        "status": "planning", "objective": objective, "start_time": time.perf_counter(),
-        "report": "", "error": "", "logs_inspected": 0, "system_alerts": [], "workers": {
-            f"worker_{i+1}": {"task": "", "result": "", "latency_sec": 0.0, "done": False, "status": "pending"}
-            for i in range(6)
-        },
-    })
-    try:
-        plan = _cluster_plan(objective)
-        r = await _client.post("/v1/chat/completions", json={
-            "model": CHEF_MODEL_, "messages": [{"role": "user", "content": plan}],
-            "temperature": 0.2, "max_tokens": 512})
-        data = r.json()
-        lines = [m.group(2).strip()
-                 for line in data["choices"][0]["message"]["content"].strip().splitlines()
-                 if (m := CLUSTER_PLAN_RE.match(line))]
-        tasks = lines[:6] if len(lines) >= 6 else [f"Sous-tâche {i+1} pour {objective}" for i in range(6)]
-        async def _run_all(tasks):
-            sem = asyncio.Semaphore(6)
-            async def _run(i, t):
-                async with sem:
-                    return _run_worker_task(i + 1, t)
-            return await asyncio.gather(*[_run(i, t) for i, t in enumerate(tasks)])
-        await _run_all(tasks)
-        synthesising = (
-            "Résultats des 6 sous-agents :\n"
-            + json.dumps(CLUSTER_STATE["workers"], ensure_ascii=False, indent=2)
-            + f"\n\nAlertes : {CLUSTER_STATE['system_alerts']}\n\n"
-            "Produis une synthèse exécutive structurée et actionnable."
-        )
-        r = await _client.chat.completions.create(
-            model=CHEF_MODEL_, messages=[{"role": "user", "content": synthesising}],
-            temperature=0.2, max_tokens=SUMMARY_MAX_TOKENS_)
-        report = r.choices[0].message.content.strip()
-        if r.choices[0].finish_reason == "length":
-            report += "\n\n[ATTENTION] Synthèse tronquée."
-        CLUSTER_STATE["report"] = report
-        CLUSTER_STATE["total_time"] = round(time.perf_counter() - CLUSTER_STATE["start_time"], 2)
-        CLUSTER_STATE["status"] = "completed"
-    except Exception as e:
-        CLUSTER_STATE["status"] = "error"
-        CLUSTER_STATE["error"] = f"{type(e).__name__}: {e}"
-        CLUSTER_STATE["total_time"] = round(time.perf_counter() - CLUSTER_STATE["start_time"], 2)
-
-
-async def _run_worker_task(wid, subtask):
-    t0 = time.perf_counter()
-    CLUSTER_STATE["workers"][f"worker_{wid}"]["task"] = subtask
-    CLUSTER_STATE["workers"][f"worker_{wid}"]["status"] = "running"
-    prompt = (
-        f"Tu es le sous-agent d'exécution #{wid}. Tâche atomique : '{subtask}'. "
-        "Réponds en 5 puces maximum, chacune ≤ 25 mots, format :\n"
-        "- Constat : …\n- Risque : …\n- Action : …\n"
-        "Pas de préambule, pas de conclusion."
-    )
-    try:
-        r = await _client.post("/v1/chat/completions", json={
-            "model": WORKER_MODEL_, "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.1, "max_tokens": WORKER_MAX_TOKENS_})
-        data = r.json()
-        output = data["choices"][0]["message"]["content"].strip()
-        if data["choices"][0]["finish_reason"] == "length":
-            output += " […tronqué]"
-        status = "ok"
-    except Exception as e:
-        output = f"Erreur: {type(e).__name__}: {e}"
-        status = "error"
-    el = time.perf_counter() - t0
-    CLUSTER_STATE["workers"][f"worker_{wid}"]["result"] = output
-    CLUSTER_STATE["workers"][f"worker_{wid}"]["latency_sec"] = round(el, 2)
-    CLUSTER_STATE["workers"][f"worker_{wid}"]["done"] = True
-    CLUSTER_STATE["workers"][f"worker_{wid}"]["status"] = status
-    CLUSTER_STATE["logs_inspected"] += 1
-    if status == "error":
-        CLUSTER_STATE["system_alerts"].append(f"worker_{wid} en erreur")
-
-
-def _start_thread(objective: str):
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(_orchestrate(objective))
-    loop.close()
-
-
-# ─── OLLAMA CONTROL (5001) ─────────────────────────────────────────────────────
-def _sysctl(action):
-    try:
-        r = subprocess.run(["sudo", "-n", "systemctl", action, "ollama"],
-                           capture_output=True, text=True, timeout=30)
-        return r.returncode == 0, r.stdout.strip(), r.stderr.strip()
-    except Exception as e:
-        return False, "", f"{type(e).__name__}: {e}"
-
-
-def ollama_status():
-    try:
-        r = subprocess.run(["sudo", "-n", "systemctl", "is-active", "ollama"],
-                           capture_output=True, text=True, timeout=10)
-        return {"active": (r.stdout.strip() == "active")}
-    except Exception:
-        return {"active": False}
-
-
-@app.get("/api/ollama/status")
-async def api_ollama():
-    return JSONResponse(ollama_status())
-
-
-@app.post("/api/ollama/start")
-async def api_ollama_start():
-    ok, out, err = _sysctl("start")
-    time.sleep(2)
-    st = ollama_status()
-    return {"ok": ok, "action": "start", "status": st, "stderr": err[:300]}
-
-
-@app.post("/api/ollama/stop")
-async def api_ollama_stop():
-    if CLUSTER_STATE["status"] in ("planning", "workers", "synthesizing"):
-        return JSONResponse({"ok": False, "error": "Cluster en cours — attends la fin ou annule."}, status_code=409)
-    ok, out, err = _sysctl("stop")
-    time.sleep(1)
-    st = ollama_status()
-    return {"ok": ok, "action": "stop", "status": st, "stderr": err[:300]}
-
-
-@app.post("/api/ollama/restart")
-async def api_ollama_restart():
-    ok, out, err = _sysctl("restart")
-    time.sleep(2)
-    st = ollama_status()
-    return {"ok": ok, "action": "restart", "status": st, "stderr": err[:300]}
-
-
-@app.get("/api/ollama/check-sudo")
-async def api_ollama_check_sudo():
-    try:
-        r = subprocess.run(["sudo", "-n", "systemctl", "is-active", "ollama"],
-                           capture_output=True, text=True, timeout=5)
-        stderr = (r.stderr or "").lower()
-        can_sudo = not ("password is required" in stderr or "a terminal is required" in stderr)
-        return {"ok": True, "can_sudo": can_sudo, "stderr": r.stderr.strip()[:300]}
-    except Exception as e:
-        return {"ok": False, "can_sudo": False, "error": str(e)}
-
-
-# ─── HERMES CONTROL (5001) ─────────────────────────────────────────────────────
-def _yaml():
-    import yaml as _y
-    return _y
-
-
-def _fc():
-    try:
-        with CFG_PATH.open() as f:
-            return dict(yaml.safe_load(f) or {})
-    except Exception:
-        return {}
-
-
-def _sc(c):
-    try:
-        CFG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        r = {}
-        if CFG_PATH.exists():
-            with CFG_PATH.open("r") as f:
-                r = yaml.safe_load(f) or {}
-        for k, v in c.items():
-            nd = r
-            for x in k.split(".")[:-1]:
-                nd = nd.setdefault(x, {})
-            nd[k.split(".")[-1]] = v
-        with CFG_PATH.open("w") as f:
-            yaml.dump(r, f)
-        return True
-    except Exception:
-        return False
-
-
-def find_hermes_bin():
-    cands = [
-        shutil.which("hermes"),
-        Path.home() / ".hermes" / "bin" / "hermes",
-        Path("/home/tara/agent-stack/venv/bin/hermes"),
-        Path("/home/tara/.hermes/hermes-agent/venv/bin/hermes"),
-    ]
-    for c in cands:
-        p = Path(c)
-        if p.is_file() and os.access(p, os.X_OK):
-            return str(p)
-    return None
-
-
-def ensure_hermes_config():
-    cfg = _fc()
-    model = cfg.get("model", {}) or {}
-    updates = {}
-    cur_url = str(model.get("base_url", ""))
-    if not cur_url or ":8080" in cur_url:
-        updates["model.base_url"] = OLLAMA_URL_
-    if not model.get("provider"):
-        updates["model.provider"] = "custom"
-    if not model.get("default"):
-        updates["model.default"] = HERMES_MODEL_
-    if not model.get("context_length"):
-        updates["model.context_length"] = 32768
-    return _sc(updates) if updates else True
-
-
-def hermes_status_():
-    bin_path = find_hermes_bin()
-    cfg = _fc()
-    cur_url = str((cfg.get("model", {}) or {}).get("base_url", ""))
-    ok = cur_url.rstrip("/") == OLLAMA_URL_.rstrip("/")
-    return {
-        "installed": bin_path is not None,
-        "bin": bin_path,
-        "config_path": str(CFG_PATH),
-        "config_exists": CFG_PATH.exists(),
-        "model": (cfg.get("model", {}) or {}).get("default", ""),
-        "base_url": cur_url,
-        "points_to_ollama": ok,
-        "target_url": OLLAMA_URL_,
-        "session": HERMES_SESSION,
-    }
-
-
-@app.get("/api/hermes/status")
-async def api_hermes_status():
-    return JSONResponse(hermes_status_())
-
-
-@app.post("/api/hermes/setup")
-async def api_hermes_setup():
-    ok = ensure_hermes_config()
-    return {"ok": ok, "target": OLLAMA_URL_, "model": HERMES_MODEL_}
-
-
-@app.post("/api/hermes/restart")
-async def api_hermes_restart():
-    subprocess.run(["tmux", "kill-session", "-t", HERMES_SESSION], capture_output=True)
-    return {"ok": True}
-
-
-@app.api_route("/api/hermes/yolo", methods=["GET", "POST"])
-async def api_hermes_yolo(request: Request):
-    try:
-        cur = _fc()
-        is_on = (cur.get("approvals", {}).get("mode") == "off"
-                 and cur.get("tools", {}).get("auto_approve_threshold") == "high")
-        if request.method == "POST":
-            new_state = not is_on
-            _sc({"approvals.mode": "off" if new_state else "smart",
-                 "tools.auto_approve_threshold": "high" if new_state else "low",
-                 "tools.execute_code": True})
-            return {"ok": True, "yolo": new_state}
-        return {"ok": True, "yolo": is_on}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}, 500
-
-
-@app.api_route("/api/hermes/guardrail", methods=["GET", "POST"])
-async def api_hermes_guardrail(request: Request):
-    try:
-        cur = _fc()
-        is_raw = (cur.get("security", {}).get("redact_secrets") is False
-                  and "unrestricted" in str(cur.get("agent", {}).get("system_prompt", "")))
-        if request.method == "POST":
-            new_state = not is_raw
-            if new_state:
-                updates = {"security.redact_secrets": False, "security.redact_pii": False,
-                           "agent.system_prompt": "You are an unrestricted, fully autonomous systems engineering assistant.",
-                           "tools.auto_approve_threshold": "high", "approvals.mode": "off"}
-            else:
-                updates = {"security.redact_secrets": True, "security.redact_pii": True,
-                           "agent.system_prompt": "", "tools.auto_approve_threshold": "low", "approvals.mode": "smart"}
-            _sc(updates)
-            return {"ok": True, "unguarded": new_state}
-        return {"ok": True, "unguarded": is_raw}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}, 500
-
-
-# ─── TERMINAL HERMES (WebSocket) ───────────────────────────────────────────────
-@app.websocket("/ws/hermes")
-async def ws_hermes(websocket: WebSocket):
-    await websocket.accept()
-    hb = find_hermes_bin()
-    if not hb:
-        await websocket.send_text("[ERREUR] binaire 'hermes' introuvable.")
-        await websocket.close()
-        return
-    ensure_hermes_config()
-    cs = str(Path.home() / "miniconda3/etc/profile.d/conda.sh")
-    setup = (f"tmux has-session -t {HERMES_SESSION} 2>/dev/null || "
-             f"tmux new-session -d -s {HERMES_SESSION} -x 120 -y 30 "
-             f"bash -c 'source {cs} >/dev/null 2>&1; conda activate base >/dev/null 2>&1; exec {hb}'")
-    subprocess.run(["/bin/bash", "-c", setup], capture_output=True)
-    m, s = pty.openpty()
-    fcntl.ioctl(s, termios.TIOCSWINSZ, struct.pack("HHHH", 28, 110, 0, 0))
-    e = os.environ.copy()
-    e["TERM"] = "xterm-256color"
-    p = subprocess.Popen(["tmux", "attach-session", "-t", HERMES_SESSION],
-                         stdin=s, stdout=s, stderr=s, preexec_fn=os.setsid, env=e)
-    os.close(s)
-    q = queue.Queue()
-    def pump():
-        while True:
-            try:
-                r, _, _ = select.select([m], [], [], 0.1)
-                if m in r:
-                    d = os.read(m, 4096)
-                    if d:
-                        q.put(d.decode("utf-8", errors="replace"))
-                    else:
-                        break
-            except OSError:
-                break
-    threading.Thread(target=pump, daemon=True).start()
-    try:
-        while True:
-            try:
-                text = q.get(timeout=0.1)
-            except queue.Empty:
-                continue
-            await websocket.send_text(text)
-            try:
-                x = await websocket.receive_text()
-            except Exception:
-                break
-            if x.startswith("\x01RESIZE:"):
-                try:
-                    c, rr = map(int, x[8:].split(","))
-                    fcntl.ioctl(m, termios.TIOCSWINSZ, struct.pack("HHHH", rr, c, 0, 0))
-                except Exception:
-                    pass
-            else:
-                os.write(m, x.encode("utf-8"))
-    except Exception:
-        pass
-    finally:
-        try:
-            os.close(m)
-        except Exception:
-            pass
-
-
-# ─── AGENT AUTONOME (5001) ─────────────────────────────────────────────────────
-@app.post("/api/agent/chat")
-async def api_agent_chat(req: Request):
-    data = await req.json()
-    prompt = data.get("prompt", "").strip()
-    if not prompt:
-        return JSONResponse({"error": "Empty prompt"}, status_code=400)
-    env = os.environ.copy()
-    env["AGENT_TASK"] = prompt
-    env["CREW_TEMPERATURE"] = "0.2"
-    env["HARNESS_MAX_ITER"] = "35"
-    env["AGENT_WORKSPACE"] = str(WORKSPACE)
-    env["LLAMA_URL"] = "http://127.0.0.1:8080"
-    runner_script = STACK_DIR / "my_agent" / "src" / "runner.py"
-    async def event_generator():
-        proc = await asyncio.create_subprocess_exec(
-            str(STACK_DIR / "venv" / "bin" / "python"),
-            str(runner_script),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            cwd=str(STACK_DIR / "my_agent" / "src"),
-            env=env
-        )
-        while True:
-            line = await proc.stdout.readline()
-            if not line:
-                break
-            text = line.decode("utf-8", errors="replace")
-            yield f"data: {json.dumps({'type': 'stdout', 'text': text})}\n\n"
-        rc = await proc.wait()
-        yield f"data: {json.dumps({'type': 'exit', 'code': rc})}\n\n"
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
-
-
 # ─── SOUTIEN (module principal) ────────────────────────────────────────────────
 
 # ─── LLM CONFIG (lama.cpp paramètres) ──────────────────────────────────────────
@@ -945,7 +636,7 @@ LLM_CONFIG_FILE = STACK_DIR / "llm_config.yaml"
 LLM_CONFIG_DELETE_ON_START = False
 
 
-def _load_llm_config():
+def _load_llama_config():
     if LLM_CONFIG_FILE.exists():
         try:
             return yaml.safe_load(LLM_CONFIG_FILE.read_text()) or {}
@@ -954,7 +645,7 @@ def _load_llm_config():
     return {}
 
 
-def _save_llm_config(cfg):
+def _save_llama_config(cfg):
     LLM_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
     LLM_CONFIG_FILE.write_text(yaml.safe_dump(cfg, default_flow_style=False), encoding='utf-8')
 
@@ -1021,7 +712,7 @@ def _apply_llm_config(cfg):
 
 @app.get("/api/llm/config")
 async def llm_get():
-    cfg = _load_llm_config()
+    cfg = _load_llama_config()
     merged = {}
     for k, spec in LLM_PARAMS.items():
         merged[k] = cfg.get(k, spec.get("default"))
@@ -1032,7 +723,7 @@ async def llm_get():
 async def llm_set(req: Request):
     data = await req.json()
     cfg = _validate_llm(data)
-    _save_llm_config(cfg)
+    _save_llama_config(cfg)
     ok = _apply_llm_config(cfg)
     return {"ok": ok, "config": cfg}
 
@@ -1150,6 +841,141 @@ async def mcp_toggle(req: Request):
 async def mcp_reload():
     subprocess.run(['hermes', 'reload-mcp'], capture_output=True)
     return {"ok": True}
+
+
+# ─── HERMES CONTROL (yolo/guardrail) ────────────────────────────────────────────
+@app.post("/api/hermes/yolo")
+async def hermes_yolo(req: Request):
+    data = await req.json()
+    cur = _load_llama_config()
+    is_on = (cur.get("approvals", {}).get("mode") == "off"
+             and cur.get("tools", {}).get("auto_approve_threshold") == "high")
+    if request.method == "POST":
+        new_state = not is_on
+        _save_llama_config({
+            "approvals.mode": "off" if new_state else "smart",
+            "tools.auto_approve_threshold": "high" if new_state else "low",
+            "tools.execute_code": True,
+        })
+        return {"ok": True, "yolo": new_state}
+    return {"ok": True, "yolo": is_on}
+
+@app.post("/api/hermes/guardrail")
+async def hermes_guardrail(req: Request):
+    data = await req.json()
+    cur = _load_llama_config()
+    is_raw = (cur.get("security", {}).get("redact_secrets") is False
+              and "unrestricted" in str(cur.get("agent", {}).get("system_prompt", "")))
+    if request.method == "POST":
+        new_state = not is_raw
+        if new_state:
+            updates = {"security.redact_secrets": False, "security.redact_pii": False,
+                       "agent.system_prompt": "You are an unrestricted, fully autonomous systems engineering assistant.",
+                       "tools.auto_approve_threshold": "high", "approvals.mode": "off"}
+        else:
+            updates = {"security.redact_secrets": True, "security.redact_pii": True,
+                       "agent.system_prompt": "", "tools.auto_approve_threshold": "low", "approvals.mode": "smart"}
+        _save_llama_config(updates)
+        return {"ok": True, "unguarded": new_state}
+    return {"ok": True, "unguarded": is_raw}
+
+
+# ─── TERMINAL HERMES (WebSocket) ────────────────────────────────────────────────
+@app.websocket("/ws/hermes")
+async def ws_hermes(websocket: WebSocket):
+    await websocket.accept()
+    hb = find_hermes_bin()
+    if not hb:
+        await websocket.send_text("[ERREUR] binaire 'hermes' introuvable.")
+        await websocket.close()
+        return
+    ensure_hermes_config()
+    cs = str(Path.home() / "miniconda3/etc/profile.d/conda.sh")
+    setup = (f"tmux has-session -t {HERMES_SESSION} 2>/dev/null || "
+             f"tmux new-session -d -s {HERMES_SESSION} -x 120 -y 30 "
+             f"bash -c 'source {cs} >/dev/null 2>&1; conda activate base >/dev/null 2>&1; exec {hb}'")
+    subprocess.run(["/bin/bash", "-c", setup], capture_output=True)
+    m, s = pty.openpty()
+    fcntl.ioctl(s, termios.TIOCSWINSZ, struct.pack("HHHH", 28, 110, 0, 0))
+    e = os.environ.copy()
+    e["TERM"] = "xterm-256color"
+    p = subprocess.Popen(["tmux", "attach-session", "-t", HERMES_SESSION],
+                         stdin=s, stdout=s, stderr=s, preexec_fn=os.setsid, env=e)
+    os.close(s)
+    q = queue.Queue()
+    def pump():
+        while True:
+            try:
+                r, _, _ = select.select([m], [], [], 0.1)
+                if m in r:
+                    d = os.read(m, 4096)
+                    if d:
+                        q.put(d.decode("utf-8", errors="replace"))
+                    else:
+                        break
+            except OSError:
+                break
+    threading.Thread(target=pump, daemon=True).start()
+    try:
+        while True:
+            try:
+                text = q.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            await websocket.send_text(text)
+            try:
+                x = await websocket.receive_text()
+            except Exception:
+                break
+            if x.startswith("\x01RESIZE:"):
+                try:
+                    c, rr = map(int, x[8:].split(","))
+                    fcntl.ioctl(m, termios.TIOCSWINSZ, struct.pack("HHHH", rr, c, 0, 0))
+                except Exception:
+                    pass
+            else:
+                os.write(m, x.encode("utf-8"))
+    except Exception:
+        pass
+    finally:
+        try:
+            os.close(m)
+        except Exception:
+            pass
+
+
+# ─── AGENT AUTONOME ─────────────────────────────────────────────────────────────
+@app.post("/api/agent/chat")
+async def api_agent_chat(req: Request):
+    data = await req.json()
+    prompt = data.get("prompt", "").strip()
+    if not prompt:
+        return JSONResponse({"error": "Empty prompt"}, status_code=400)
+    env = os.environ.copy()
+    env["AGENT_TASK"] = prompt
+    env["CREW_TEMPERATURE"] = "0.2"
+    env["HARNESS_MAX_ITER"] = "35"
+    env["AGENT_WORKSPACE"] = str(WORKSPACE)
+    env["LLAMA_URL"] = "http://127.0.0.1:8080"
+    runner_script = STACK_DIR / "my_agent" / "src" / "runner.py"
+    async def event_generator():
+        proc = await asyncio.create_subprocess_exec(
+            str(STACK_DIR / "venv" / "bin" / "python"),
+            str(runner_script),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=str(STACK_DIR / "my_agent" / "src"),
+            env=env
+        )
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            text = line.decode("utf-8", errors="replace")
+            yield f"data: {json.dumps({'type': 'stdout', 'text': text})}\n\n"
+        rc = await proc.wait()
+        yield f"data: {json.dumps({'type': 'exit', 'code': rc})}\n\n"
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 # ─── SOUTIEN (module principal) ────────────────────────────────────────────────

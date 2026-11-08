@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Unified LLM Controller & Cluster Deck</title>
+<title>Unified LLM Controller & Terminal Deck</title>
 <style>
   :root {
     --bg: #0b0e14; --card: #151922; --border: #2d3342;
@@ -48,37 +48,15 @@
 
   details summary { font-size: 11px; text-transform: uppercase; color: var(--muted); cursor: pointer; padding: 2px 0; }
   #log-output { height: 110px; background: #05070a; border: 1px solid var(--border); border-radius: 4px; padding: 8px; font-family: var(--mono); font-size: 11px; color: #8b949e; overflow-y: auto; white-space: pre-wrap; margin-top: 4px; }
-
-  /* Cluster panel extras */
-  #cluster-workers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
-  .worker-card { border: 1px solid var(--border); border-radius: 4px; padding: 6px; background: #080a0f; min-height: 52px; }
-  .worker-card .w-name { font-size: 10px; color: var(--muted); }
-  .worker-card .w-status { font-size: 10px; font-weight: 600; }
-  .worker-card.ready .w-status { color: #3fb950; }
-  .worker-card.running .w-status { color: #f0883e; }
-  .worker-card.error .w-status { color: #f85149; }
-  .worker-card.idle .w-status { color: #8b949e; }
-  .report-box { background: #05070a; border: 1px solid var(--border); border-radius: 4px; padding: 8px; font-family: var(--mono); font-size: 10.5px; color: #e6edf3; white-space: pre-wrap; line-height: 1.4; min-height: 80px; max-height: 120px; overflow-y: auto; }
-
-  /* Ollama + Hermes control rows */
-  .ctrl-row { display: flex; gap: 6px; margin-bottom: 8px; }
-  .ctrl-row button { flex: 1; }
-  .switch-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
-  .switch { position: relative; width: 44px; height: 24px; background: #21262d; border-radius: 12px; cursor: pointer; transition: background 0.15s; }
-  .switch.on { background: var(--green); }
-  .switch .knob { position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 50%; background: #0b0e14; transition: transform 0.15s; }
-  .switch.on .knob { transform: translateX(20px); background: #fff; }
 </style>
 </head>
 <body>
 
 <header>
-  <h1>🚀 Unified LLM Controller & Cluster Deck</h1>
+  <h1>🚀 Unified LLM Controller & Terminal Deck</h1>
   <div class="badges">
     <span id="badge-llama" class="badge">LLM: Checking...</span>
-    <span id="badge-ollama" class="badge">Ollama: Offline</span>
     <span id="badge-hermes" class="badge">Hermes: Offline</span>
-    <span id="badge-cluster" class="badge">Cluster: Idle</span>
   </div>
 </header>
 
@@ -140,32 +118,9 @@
       <div id="chat-log" style="font-family:ui-monospace,monospace; font-size:11px; white-space:pre-wrap; color:#7ee787; min-height:48px;"></div>
     </section>
 
-    <!-- 5. Bonsai Cluster Control -->
-    <section class="panel">
-      <h2>🧩 Bonsai Cluster Control (6 workers)</h2>
-      <div style="display:flex; gap:6px; margin-bottom:8px;">
-        <input id="cluster-objective" placeholder="Objectif du cluster…" style="flex:1;" />
-        <button class="primary" onclick="runCluster()">▶ Lancer</button>
-        <button class="info" onclick="stopCluster()">■ Stop</button>
-      </div>
-      <div id="cluster-status" style="font-size:11px; color:var(--muted);">Status: idle</div>
-      <div id="cluster-workers"></div>
-      <div class="report-box" id="cluster-report"></div>
-    </section>
 
-    <!-- 6. Ollama Control -->
-    <section class="panel">
-      <h2>🐍 Ollama Control</h2>
-      <div class="stat-row" style="margin-bottom:6px;"><span>Status</span><span id="ollama-status-badge" class="badge">checking…</span></div>
-      <div class="ctrl-row">
-        <button class="primary" onclick="ollamaStart()">▶ Start</button>
-        <button class="danger" onclick="ollamaStop()">■ Stop</button>
-        <button onclick="ollamaRestart()">🔄 Restart</button>
-        <button class="info" onclick="ollamaCheckSudo()">⚙ Sudo</button>
-      </div>
-    </section>
 
-    <!-- 7. Hermes Control -->
+    <!-- 6. Hermes Control -->
     <section class="panel">
       <h2>🧙 Hermes Control</h2>
       <div class="ctrl-row">
@@ -333,24 +288,26 @@ async function updateStats() {
     const d = await res.json();
 
     // CPU
-    $('txt-cpu').textContent = d.cpu_percent.toFixed(1) + '%';
+    $('txt-cpu').textContent = d.cpu.percent.toFixed(1) + '%';
 
     // RAM
     $('txt-ram').textContent = d.ram.used_gb.toFixed(2) + ' / ' + d.ram.total_gb.toFixed(2) + ' GB';
 
-    // Disk
-    $('txt-disk').textContent = d.storage.percent.toFixed(1) + '%';
+    // Disk (calculate % from used/total)
+    const diskTotal = d.storage.total || 1;
+    const diskUsed = d.storage.used || 0;
+    $('txt-disk').textContent = (diskUsed / diskTotal * 100).toFixed(1) + '%';
 
     // GPU VRAM
     if (d.gpus && d.gpus.length) {
       for (const g of d.gpus) {
         const div = document.getElementById('txt-vram-gpu' + g.index);
         const bar = document.getElementById('bar-vram-gpu' + g.index);
-        if (div && bar) {
+        if (div && bar && g.utilization) {
           const vramUsedGB = g.vram_used_mb / 1024;
           const vramTotalGB = g.vram_total_mb / 1024;
-          div.textContent = vramUsedGB.toFixed(2) + ' / ' + vramTotalGB.toFixed(2) + ' GB (' + g.util + '%)';
-          bar.value = g.util;
+          div.textContent = vramUsedGB.toFixed(2) + ' / ' + vramTotalGB.toFixed(2) + ' GB (' + g.utilization.gpu + '%)';
+          bar.value = g.utilization.gpu;
         }
       }
     }
@@ -604,97 +561,8 @@ async function sendTerm() {
     connectTerminal();
   });
 
-// ─── CLUSTER (5001) ──────────────────────────────────────────────────────────
-async function runCluster() {
-  const obj = $('cluster-objective').value.trim();
-  if (!obj) { alert('Veuillez saisir un objectif.'); return; }
-  if (confirm('Lancer le cluster sur cet objectif ?')) {
-    try {
-      const res = await fetch('/api/cluster/run', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({objective: obj})
-      });
-      const d = await res.json();
-      if (d.ok) {
-        $('cluster-status').textContent = 'Status: running…';
-        $('cluster-workers').innerHTML = '';
-        for (let i = 1; i <= 6; i++) addWorkerCard(i);
-        $('cluster-report').textContent = 'Lancement…';
-        refreshCluster();
-      } else {
-        alert(d.error || 'Échec');
-      }
-    } catch(e) { alert('Erreur: ' + e); }
-  }
-}
-async function stopCluster() {
-  try {
-    const res = await fetch('/api/cluster/run', {method: 'POST', body: JSON.stringify({objective: 'STOP'})}); // will be ignored
-    refreshCluster();
-  } catch(e) {}
-}
-function addWorkerCard(i) {
-  const card = document.createElement('div');
-  card.className = 'worker-card idle';
-  card.innerHTML = `<div class="w-name">Worker #${i}</div><div class="w-status">IDLE</div>`;
-  $('cluster-workers').appendChild(card);
-}
-async function refreshCluster() {
-  try {
-    const res = await fetch('/api/cluster/status');
-    const d = await res.json();
-    const cards = $('cluster-workers').children;
-    for (let i = 0; i < cards.length; i++) {
-      const wid = (i + 1).toString();
-      const w = d.workers[wid];
-      if (w) {
-        const c = cards[i];
-        c.className = 'worker-card ' + (w.status || 'idle');
-        c.querySelector('.w-name').textContent = 'Worker #' + wid + ' — ' + w.task;
-        c.querySelector('.w-status').textContent = (w.status || 'pending') + (w.done ? ' ✓' : '');
-      }
-    }
-    $('cluster-report').textContent = d.report || d.error || 'Aucun rapport';
-    const badge = $('badge-cluster');
-    badge.textContent = 'Cluster: ' + (d.status || 'idle');
-    badge.className = 'badge ' + (d.status === 'completed' ? 'ok' : d.status === 'error' ? 'err' : 'info');
-    if (d.status !== 'idle' && d.status !== 'running') {
-      setTimeout(refreshCluster, 2000);
-    }
-  } catch(e) {}
-}
 
-// ─── OLLAMA (5001) ───────────────────────────────────────────────────────────
-async function ollamaStatus() {
-  try {
-    const res = await fetch('/api/ollama/status');
-    const d = await res.json();
-    const badge = $('ollama-status-badge');
-    badge.textContent = d.active ? 'ON' : 'OFF';
-    badge.className = 'badge ' + (d.active ? 'ok' : 'err');
-    return d.active;
-  } catch(e) { return false; }
-}
-async function ollamaStart() { const r = await fetch('/api/ollama/start', {method:'POST'}); showOllamaJson(r); }
-async function ollamaStop() { const r = await fetch('/api/ollama/stop', {method:'POST'}); showOllamaJson(r); }
-async function ollamaRestart() { const r = await fetch('/api/ollama/restart', {method:'POST'}); showOllamaJson(r); }
-async function ollamaCheckSudo() {
-  const r = await fetch('/api/ollama/check-sudo', {method:'GET'});
-  const d = await r.json();
-  alert(d.can_sudo ? 'Sudo OK' : 'Sudo FAIL: ' + (d.stderr || d.error));
-}
-async function showOllamaJson(r) {
-  try {
-    const d = await r.json();
-    const ok = d.ok ? 'OK' : 'ERR';
-    const txt = d.action + ': ' + ok + (d.status ? ' (' + JSON.stringify(d.status) + ')' : '') + (d.stderr ? ' ' + d.stderr : '');
-    $('ollama-status-badge').textContent = txt;
-  } catch(e) {}
-}
-setInterval(async () => { const a = await ollamaStatus(); $('badge-ollama').textContent = a ? 'Ollama: ON' : 'Ollama: OFF'; $('badge-ollama').className = 'badge ' + (a ? 'ok' : 'err'); }, 4000);
-
-// ─── HERMES CONTROL (5001) ───────────────────────────────────────────────────
+// ─── HERMES CONTROL ───────────────────────────────────────────────────
 async function hermesStatus() {
   try {
     const res = await fetch('/api/hermes/status');
@@ -712,16 +580,21 @@ async function hermesRestart() {
   alert((await r.json()).ok ? 'Restart OK' : 'Restart FAIL');
 }
 async function toggleYolo() {
-  const r = await fetch('/api/hermes/yolo', {method: (await fetch('/api/hermes/yolo').then(x=>x.json())).yolo ? 'POST' : 'GET'});
+  const r = await fetch('/api/hermes/yolo');
   const d = await r.json();
-  $('yolo-switch').className = 'switch ' + (d.yolo ? 'on' : '');
-  $('yolo-label').textContent = d.yolo ? 'ON' : 'OFF';
+  const postRes = await fetch('/api/hermes/yolo', {method: 'POST'});
+  const postD = await postRes.json();
+  $('yolo-switch').className = 'switch ' + (postD.yolo ? 'on' : '');
+  $('yolo-label').textContent = postD.yolo ? 'ON' : 'OFF';
 }
 async function toggleGuardrail() {
-  const r = await fetch('/api/hermes/guardrail', {method: (await fetch('/api/hermes/guardrail').then(x=>x.json())).unguarded ? 'POST' : 'GET'});
+  const r = await fetch('/api/hermes/guardrail');
   const d = await r.json();
-  $('guardrail-switch').className = 'switch ' + (d.unguarded ? 'on' : '');
-  $('guardrail-label').textContent = d.unguarded ? 'Unguarded' : 'Guarded';
+  const new_state = !d.unguarded;
+  const postRes = await fetch('/api/hermes/guardrail', {method: 'POST'});
+  const postD = await postRes.json();
+  $('guardrail-switch').className = 'switch ' + (postD.unguarded ? 'on' : '');
+  $('guardrail-label').textContent = postD.unguarded ? 'Unguarded' : 'Guarded';
 }
 setInterval(hermesStatus, 4000);
 
