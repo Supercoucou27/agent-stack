@@ -81,6 +81,263 @@ def ensure_hermes_config():
     return cfg_path
 
 
+# ─── MCP CLIENT MANAGER (inside Hermes agent) ─────────────────────────────────
+# Embeds MCP server management directly inside the Hermes agent, transforming
+# it from a simple terminal executor into an MCP Host/Client.
+import asyncio
+import json
+import subprocess
+import shlex
+from pathlib import Path
+from typing import Optional
+
+try:
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+    from mcp.types import Tool, TextContent
+    MCP_AVAILABLE = True
+except ImportError:
+    MCP_AVAILABLE = False
+    ClientSession = None
+    StdioServerParameters = None
+    stdio_client = None
+
+
+class MCPManager:
+    """Manages MCP server lifecycle inside Hermes agent."""
+
+    def __init__(self, config_path: Path = None):
+        self.config_path = config_path or (Path.home() / '.hermes' / 'mcp_config.json')
+        self.sessions = {}
+        self._exit_stack = None
+        self.tools = []
+        self._running = False
+
+    def _load_config(self) -> dict:
+        """Load MCP server configuration from JSON file."""
+        if not self.config_path.exists():
+            return {}
+        try:
+            with open(self.config_path, 'r') as f:
+                return json.load(f).get('mcpServers', {})
+        except Exception as e:
+            logger.warning(f'[MCP] Failed to load config: {e}')
+            return {}
+
+    def _load_config_from_env(self) -> dict:
+        """Load MCP config if specified via HERMES_MCP_CONFIG env var."""
+        env_path = os.environ.get('HERMES_MCP_CONFIG')
+        if env_path and Path(env_path).exists():
+            try:
+                with open(env_path, 'r') as f:
+                    return json.load(f).get('mcpServers', {})
+            except Exception as e:
+                logger.warning(f'[MCP] Failed to load env config: {e}')
+        return {}
+
+    async def initialize(self):
+        """Start all MCP servers and create client sessions."""
+        if not MCP_AVAILABLE:
+            logger.warning('[MCP] SDK not available. Install with: pip install mcp')
+            return
+
+        self._exit_stack = AsyncExitStack()
+        self.sessions = {}
+        self.tools = []
+        config = self._load_config()
+        if not config:
+            config = self._load_config_from_env()
+
+        for server_name, params in config.items():
+            try:
+                # Setup standard I/O connection
+                server_params = StdioServerParameters(
+                    command=params.get("command", ""),
+                    args=params.get("args", []),
+                    env=params.get("env")
+                )
+
+                # Enter the context manager to keep the process alive
+                read_stream, write_stream = await self._exit_stack.enter_async_context(
+                    stdio_client(server_params)
+                )
+                session = await self._exit_stack.enter_async_context(
+                    ClientSession(read_stream, write_stream)
+                )
+                await session.initialize()
+
+                self.sessions[server_name] = session
+                logger.info(f'[MCP] Server "{server_name}" connected.')
+            except Exception as e:
+                logger.error(f'[MCP] Failed to start "{server_name}": {e}')
+
+        # Discover all tools
+        await self._discover_tools()
+
+    async def _discover_tools(self):
+        """Fetch tools from all connected MCP servers and prefix them."""
+        self.tools = []
+        for server_name, session in self.sessions.items():
+            try:
+                response = await session.list_tools()
+                for tool in response.tools:
+                    tool_id = f"{server_name}__{tool.name}"
+                    self.tools.append({
+                        "type": "function",
+                        "function": {
+                            "name": tool_id,
+                            "description": tool.description or f"Tool from {server_name}",
+                            "parameters": tool.inputSchema or {}
+                        },
+                        "server": server_name,
+                        "original_name": tool.name
+                    })
+                    logger.debug(f'[MCP] Registered tool: {tool_id}')
+            except Exception as e:
+                logger.error(f'[MCP] Failed to list tools for {server_name}: {e}')
+
+    def get_all_tools(self) -> list:
+        """Synchronous version for initial loading."""
+        return self.tools
+
+    async def call_tool(self, tool_name: str, arguments: dict):
+        """Route a tool call to the correct MCP server."""
+        # Parse the prefixed tool name
+        if '__' in tool_name:
+            server_name, tool_name = tool_name.split('__', 1)
+        else:
+            # Backward compatibility - try direct match
+            server_name = None
+            for sn in self.sessions:
+                if tool_name.startswith(sn + '__'):
+                    server_name = sn
+                    tool_name = tool_name[len(sn)+2:]
+                    break
+
+        if server_name not in self.sessions:
+            return f"Error: Unknown MCP server '{server_name}'"
+
+        # SECURITY: Enforce allowlist before execution
+        allowed_tools = os.environ.get('HERMES_MCP_ALLOWLIST', '')
+        if allowed_tools:
+            allowed = [t.strip() for t in allowed_tools.split(',')]
+            if tool_name not in allowed:
+                return f"Security Error: Tool '{tool_name}' not in allowlist"
+
+        session = self.sessions[server_name]
+        try:
+            result = await session.call_tool(tool_name, arguments)
+            # Extract text content
+            if hasattr(result, 'content'):
+                for c in result.content:
+                    if isinstance(c, TextContent):
+                        return c.text
+            return str(result)
+        except Exception as e:
+            return f"Error executing tool {tool_name}: {str(e)}"
+
+    async def close(self):
+        """Shut down all MCP server sessions."""
+        if self._exit_stack:
+            await self._exit_stack.aclose()
+        self.sessions.clear()
+        logger.info('[MCP] All servers closed.')
+
+    def is_available(self) -> bool:
+        return MCP_AVAILABLE
+
+# ─── HERMES AGENT WITH MCP INTEGRATION ──────────────────────────────────────────
+class HermesMCPModerator:
+    """
+    Hermes agent with integrated MCP support.
+    Transforms Hermes into an MCP Host/Client that:
+    1. Spawns MCP servers
+    2. Discovers their tools
+    3. Feeds tools to the LLM
+    4. Routes LLM tool calls back to MCP servers
+    5. Maintains WebSocket connection to UI
+    """
+
+    def __init__(self, llm_client, websocket, mcp_manager=None):
+        self.llm = llm_client
+        self.ws = websocket
+        self.mcp = mcp_manager or MCPManager()
+        self.history = []
+        self._running = False
+        self.busy = False
+
+    async def start(self):
+        """Initialize MCP and start listening."""
+        await self.mcp.initialize()
+        self._running = True
+        logger.info(f'[MCP] Total tools available: {len(self.mcp.tools)}')
+        await self.listen_ws()
+
+    async def listen_ws(self):
+        """Listen for messages on WebSocket."""
+        async for message in self.ws.iter_text():
+            await self.process_turn(message)
+
+    async def process_turn(self, user_input: str):
+        if self.busy:
+            await self.ws.send_json({"status": "busy", "message": "Agent already working."})
+            return
+
+        self.history.append({"role": "user", "content": user_input})
+        self.busy = True
+        await self.ws.send_json({"status": "thinking", "message": "Reasoning..."})
+        self.busy = False
+
+        while True:
+            try:
+                # 1. Send prompt + tools to LLM
+                response = await self.llm.chat(
+                    messages=self.history,
+                    tools=self.mcp.get_all_tools()
+                )
+            except Exception as e:
+                await self.ws.send_json({"status": "error", "message": str(e)})
+                break
+
+            message = response.choices[0].message
+
+            # 2. Check if LLM wants to use a tool
+            if message.tool_calls:
+                self.history.append(message)
+                self.busy = True
+                await self.ws.send_json({"status": "executing_tools", "tools": len(message.tool_calls)})
+
+                for tool_call in message.tool_calls:
+                    tool_name = tool_call.function.name
+                    args = json.loads(tool_call.function.arguments)
+
+                    # Execute via MCP
+                    result = await self.mcp.call_tool(tool_name, args)
+
+                    # Feed result back to LLM
+                    self.history.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": tool_name,
+                        "content": result
+                    })
+
+                self.busy = False
+                # Continue loop to get next LLM response
+            else:
+                # No tool calls - just text response
+                self.history.append({"role": "assistant", "content": message.content})
+                await self.ws.send_json({
+                    "status": "complete",
+                    "response": message.content
+                })
+                break
+
+    async def shutdown(self):
+        self._running = False
+        await self.mcp.close()
+
+
 def get_cpu_ram():
     gpus = []
     try:
@@ -1013,6 +1270,16 @@ async def ws_hermes(websocket: WebSocket):
         await websocket.close()
         return
     ensure_hermes_config()
+
+    # ─── Initialize MCP Manager inside Hermes ──────────────────────────────
+    mcp_manager = MCPManager()
+    try:
+        await mcp_manager.initialize()
+        logger.info(f'[MCP] Hermes MCP modules loaded: {len(mcp_manager.tools)} tools')
+    except Exception as e:
+        logger.error(f'[MCP] Initialization failed: {e}')
+        # Continue without MCP - backward compatible
+        mcp_manager = None
     cs = str(Path.home() / "miniconda3/etc/profile.d/conda.sh")
     setup = (f"tmux has-session -t {HERMES_SESSION} 2>/dev/null || "
              f"tmux new-session -d -s {HERMES_SESSION} -x 120 -y 30 "
@@ -1070,34 +1337,99 @@ async def ws_hermes(websocket: WebSocket):
 # ─── AGENT AUTONOME ─────────────────────────────────────────────────────────────
 @app.post("/api/agent/chat")
 async def api_agent_chat(req: Request):
+    """Agent chat endpoint with MCP tool support.
+
+    Uses HermesMCPModerator which embeds MCP client management directly inside
+    the Hermes agent, enabling dynamic tool discovery and routing.
+    """
     data = await req.json()
     prompt = data.get("prompt", "").strip()
     if not prompt:
         return JSONResponse({"error": "Empty prompt"}, status_code=400)
-    env = os.environ.copy()
-    env["AGENT_TASK"] = prompt
-    env["CREW_TEMPERATURE"] = "0.2"
-    env["HARNESS_MAX_ITER"] = "35"
-    env["AGENT_WORKSPACE"] = str(WORKSPACE)
-    env["LLAMA_URL"] = "http://127.0.0.1:8080"
-    runner_script = STACK_DIR / "my_agent" / "src" / "runner.py"
+
+    # Initialize MCP manager
+    mcp_manager = MCPManager()
+    try:
+        await mcp_manager.initialize()
+    except Exception as e:
+        logger.warning(f'[MCP] Failed to initialize: {e}')
+        mcp_manager = None
+
+    # Create Hermes agent with MCP support
+    agent = HermesMCPModerator(llm_client=None, websocket=None, mcp_manager=mcp_manager)
+
+    # Set up the conversation
+    agent.history = [
+        {"role": "system", "content": "You are an autonomous local agent."},
+        {"role": "user", "content": prompt}
+    ]
+
+    # If MCP tools are available, add them to the system prompt
+    if mcp_manager and mcp_manager.tools:
+        tool_desc = "\n\nAvailable MCP Tools:"
+        for t in mcp_manager.tools:
+            tool_desc += f'\n- {t["function"]["name"]}: {t["function"]["description"]}'
+        agent.history[0]["content"] += tool_desc
+
+    # Stream response back to client
     async def event_generator():
-        proc = await asyncio.create_subprocess_exec(
-            str(STACK_DIR / "venv" / "bin" / "python"),
-            str(runner_script),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            cwd=str(STACK_DIR / "my_agent" / "src"),
-            env=env
-        )
-        while True:
-            line = await proc.stdout.readline()
-            if not line:
-                break
-            text = line.decode("utf-8", errors="replace")
-            yield f"data: {json.dumps({'type': 'stdout', 'text': text})}\n\n"
-        rc = await proc.wait()
-        yield f"data: {json.dumps({'type': 'exit', 'code': rc})}\n\n"
+        nonlocal agent
+        # Initial MCP discovery
+        if mcp_manager and mcp_manager.tools:
+            yield f"data: {json.dumps({'type': 'mcp_discovered', 'count': len(mcp_manager.tools)})}\n\n"
+
+        # Run the agent loop
+        try:
+            while True:
+                if agent.busy:
+                    await asyncio.sleep(0.1)
+                    continue
+
+                agent.busy = True
+                # Call LLM with tools
+                try:
+                    response = await agent.llm.chat(
+                        messages=agent.history,
+                        tools=agent.mcp.get_all_tools() if agent.mcp else None
+                    )
+                except Exception as e:
+                    yield f"data: {json.dumps({'type': 'error', 'text': str(e)})}\n\n"
+                    break
+
+                message = response.choices[0].message
+
+                # Check for tool calls
+                if message.tool_calls:
+                    agent.history.append(message)
+                    yield f"data: {json.dumps({'type': 'tool_calls', 'count': len(message.tool_calls)})}\n\n"
+
+                    for tool_call in message.tool_calls:
+                        tool_name = tool_call.function.name
+                        args = json.loads(tool_call.function.arguments)
+
+                        # Route through MCP
+                        result = await agent.mcp.call_tool(tool_name, args) if agent.mcp else f"[MCP Unavailable] Tool: {tool_name}"
+
+                        # Feed result back to conversation
+                        agent.history.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "name": tool_name,
+                            "content": result
+                        })
+
+                        yield f"data: {json.dumps({'type': 'tool_result', 'tool': tool_name, 'result': result[:200]+'...' if len(result) > 200 else result})}\n\n"
+                else:
+                    # Text response
+                    agent.history.append({"role": "assistant", "content": message.content})
+                    yield f"data: {json.dumps({'type': 'complete', 'response': message.content})}\n\n"
+                    break
+
+                agent.busy = False
+        except Exception as e:
+            logger.error(f'[Agent] Error: {e}')
+            yield f"data: {json.dumps({'type': 'error', 'text': str(e)})}\n\n"
+
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
