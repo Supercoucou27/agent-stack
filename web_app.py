@@ -1,27 +1,26 @@
 import asyncio
 import json
 import os
+import shutil
+import socket
 import subprocess
 from pathlib import Path
-from fastapi import FastAPI, Request, Query
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 import httpx
 
 import monitor
 
-app = FastAPI(title="Workstation Control Deck")
+app = FastAPI(title="Unified LLM & Hermes Deck")
 STACK_DIR = Path(__file__).parent.resolve()
 WORKSPACE = Path(os.environ.get("AGENT_WORKSPACE", Path.home() / "agent-workspace")).resolve()
 MODELS_DIR = STACK_DIR / "models"
 
 @app.get("/", response_class=HTMLResponse)
 @app.get("/llm", response_class=HTMLResponse)
-async def get_llm_page():
-    return HTMLResponse((STACK_DIR / "llm.html").read_text(encoding="utf-8"))
-
 @app.get("/hermes", response_class=HTMLResponse)
-async def get_hermes_page():
-    return HTMLResponse((STACK_DIR / "hermes.html").read_text(encoding="utf-8"))
+async def get_index():
+    return HTMLResponse((STACK_DIR / "index.html").read_text(encoding="utf-8"))
 
 @app.get("/api/health")
 async def health(llama_url: str = "http://127.0.0.1:8080"):
@@ -37,6 +36,110 @@ async def health(llama_url: str = "http://127.0.0.1:8080"):
 @app.get("/api/stats")
 async def stats():
     return JSONResponse(monitor.get_stats())
+
+
+@app.post("/api/llama/chat")
+async def llm_chat(req: Request):
+    """Contrôle direct du LLM local : envoi un prompt au serveur llama-server."""
+    data = await req.json()
+    messages = data.get("messages")
+    prompt = data.get("prompt")
+    if messages is None:
+        messages = [{"role": "user", "content": (prompt or "").strip()}]
+    model = data.get("model") or "/home/tara/agent-stack/models/Qwen3.8-27B-IQ3_XS-3.01bpw.gguf"
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": data.get("temperature", 0.7),
+    }
+    try:
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            r = await client.post("http://127.0.0.1:8080/v1/chat/completions",
+                                 json=payload, headers={"Content-Type": "application/json"})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=502)
+    if r.status_code != 200:
+        return JSONResponse({"error": r.text, "status": r.status_code}, status_code=502)
+    return r.json()
+
+
+GATEWAY_SOCK = Path(os.environ.get("HERMES_GATEWAY_SOCK", "/home/tara/.hermes/gateway.sock"))
+
+
+def _hermes_binary():
+    candidates = [
+        shutil.which("hermes"),
+        Path.home() / ".hermes" / "bin" / "hermes",
+        Path("/home/tara/agent-stack/venv/bin/hermes"),
+        Path("/home/tara/.hermes/hermes-agent/venv/bin/hermes"),
+    ]
+    for c in candidates:
+        p = Path(c)
+        if p.is_file() and os.access(p, os.X_OK):
+            return str(p)
+    return str(Path(candidates[0]))
+
+
+def _hermes_status():
+    """Demande le statut de l'agent Hermes via le socket gateway."""
+    try:
+        import json as _json
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(3)
+        s.connect(str(GATEWAY_SOCK))
+        s.sendall(json.dumps({"verb": "status", "id": 1}).encode() + b"\n")
+        resp = s.recv(65536)
+        s.close()
+        d = json.loads(resp.decode("utf-8", "replace"))
+        if d.get("ok") and "result" in d:
+            return d["result"]
+    except Exception:
+        pass
+    # Fallback: lire le fichier de statut du gateway
+    gs = Path("/home/tara/.hermes/gateway_state.json")
+    try:
+        if gs.exists():
+            return json.loads(gs.read_text()).get("gateway_state", "unknown")
+    except Exception:
+        pass
+    return "offline"
+
+
+@app.get("/api/hermes/status")
+async def hermes_status():
+    return JSONResponse(_hermes_status())
+
+
+@app.post("/api/hermes/send")
+async def hermes_send(req: Request):
+    """Envoie un message direct à l'agent Hermes (via l'CLI, mode yolo)."""
+    data = await req.json()
+    msg = data.get("message", "").strip()
+    if not msg:
+        return JSONResponse({"error": "Message vide"}, status_code=400)
+    hermes_bin = _hermes_binary()
+    env = os.environ.copy()
+    env["PATH"] = f"{Path.home()}/.local/bin:{Path('/home/tara/agent-stack/venv/bin')}:{env.get('PATH', '')}"
+
+    async def event_generator():
+        proc = await asyncio.create_subprocess_exec(
+            hermes_bin, "chat", "-q", msg, "--yolo",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=str(Path.home() / "agent-workspace"),
+            env=env,
+        )
+        while True:
+            line = await proc.stdout.readline()
+            if line is None or not line:
+                break
+            text = line.decode("utf-8", errors="replace")
+            yield f"data: {json.dumps({'type': 'stdout', 'text': text, 'from': 'hermes'})}\n\n"
+
+        rc = await proc.wait()
+        yield f"data: {json.dumps({'type': 'exit', 'code': rc, 'from': 'hermes'})}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.get("/api/models")
 async def list_models():
@@ -115,7 +218,7 @@ async def restart_llama():
 
 @app.get("/api/llama/logs")
 async def llama_logs():
-    res = subprocess.run(["sudo", "journalctl", "-u", "llama-server", "-n", "45", "--no-pager"], capture_output=True, text=True)
+    res = subprocess.run(["sudo", "journalctl", "-u", "llama-server", "-n", "35", "--no-pager"], capture_output=True, text=True)
     return {"logs": res.stdout}
 
 @app.get("/api/files")
@@ -167,3 +270,8 @@ async def run_task(req: Request):
         yield f"data: {json.dumps({'type': 'exit', 'code': rc})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8082, log_level="info")

@@ -1,0 +1,4 @@
+crewai
+chromadb
+requests
+python-dotenv
