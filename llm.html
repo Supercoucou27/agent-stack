@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLM Engine & Hardware Deck</title>
+<style>
+  :root {
+    --bg: #0b0e14; --card: #151922; --card-header: #1c212c;
+    --border: #2d3342; --fg: #e6edf3; --muted: #8b949e;
+    --accent: #388bfd; --purple: #a371f7; --green: #2ea043;
+    --red: #f85149; --mono: ui-monospace, SFMono-Regular, Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font: 13px system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--fg); height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+  
+  /* Top Unified Navigation */
+  header { height: 46px; padding: 0 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; background: var(--card); flex-shrink: 0; }
+  .nav-tabs { display: flex; gap: 8px; align-items: center; }
+  .nav-tab { padding: 6px 14px; border-radius: 6px; font-weight: 500; font-size: 12px; text-decoration: none; color: var(--muted); border: 1px solid transparent; transition: all 0.15s; }
+  .nav-tab:hover { background: #21262d; color: var(--fg); }
+  .nav-tab.active { background: #1f6feb22; color: #58a6ff; border-color: #1f6feb66; font-weight: 600; }
+  
+  .badges { display: flex; gap: 8px; align-items: center; }
+  .badge { padding: 4px 10px; border-radius: 12px; font-size: 11px; font-family: var(--mono); background: var(--border); }
+  .badge.ok { background: #23863622; color: #3fb950; border: 1px solid #23863666; }
+  .badge.err { background: #da363322; color: #f85149; border: 1px solid #da363366; }
+
+  main { flex: 1; display: grid; grid-template-columns: 460px 1fr; overflow: hidden; }
+  aside { border-right: 1px solid var(--border); background: var(--card); overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+  section.panel { border: 1px solid var(--border); border-radius: 8px; padding: 14px; background: #0e121a; }
+  section.panel h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--muted); margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; }
+
+  .stat-row { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px; }
+  .stat-row span:last-child { font-family: var(--mono); font-weight: 600; }
+  progress { width: 100%; height: 7px; border-radius: 4px; appearance: none; border: none; background: #21262d; margin-bottom: 10px; }
+  progress::-webkit-progress-bar { background: #21262d; border-radius: 4px; }
+  progress::-webkit-progress-value { background: var(--accent); border-radius: 4px; }
+  progress.pool::-webkit-progress-value { background: var(--purple); }
+  progress.gpu1::-webkit-progress-value { background: #2dd4bf; }
+
+  select, input, textarea { width: 100%; background: #0b0e14; color: var(--fg); border: 1px solid var(--border); border-radius: 5px; padding: 7px 10px; font-size: 12px; font-family: inherit; }
+  button { background: #21262d; color: var(--fg); border: 1px solid var(--border); border-radius: 5px; padding: 7px 14px; cursor: pointer; font-size: 12px; font-weight: 500; }
+  button:hover { background: #30363d; }
+  button.primary { background: var(--green); border-color: #2ea043; color: #fff; }
+  button.danger { background: var(--red); border-color: #f85149; color: #fff; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  #workspace { display: flex; flex-direction: column; height: 100%; overflow: hidden; padding: 16px; gap: 12px; }
+  .log-container { flex: 1; background: #05070a; border: 1px solid var(--border); border-radius: 6px; padding: 12px; font-family: var(--mono); font-size: 11.5px; color: #7ee787; overflow-y: auto; white-space: pre-wrap; line-height: 1.45; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="nav-tabs">
+    <a href="/llm" class="nav-tab active">🧠 LLM Engine & Hardware</a>
+    <a href="/hermes" class="nav-tab">⚡ Hermes Agent Console</a>
+  </div>
+  <div class="badges">
+    <span id="badge-llama" class="badge">LLM: Checking...</span>
+    <span id="badge-host" class="badge">Host: tara-MS-7B50</span>
+  </div>
+</header>
+
+<main>
+  <aside>
+    <!-- Dual-GPU VRAM Telemetry -->
+    <section class="panel">
+      <h2>Dual-GPU VRAM Allocation <span>16.0 GB Total</span></h2>
+      
+      <div class="stat-row"><span>Aggregate VRAM Pool</span><span id="txt-vram-pool">-- / 16.0 GB</span></div>
+      <progress id="bar-vram-pool" class="pool" max="100" value="0"></progress>
+
+      <div class="stat-row"><span>GPU 0 (RTX 2070 8GB)</span><span id="txt-vram-gpu0">-- / 8192 MB</span></div>
+      <progress id="bar-vram-gpu0" max="100" value="0"></progress>
+
+      <div class="stat-row"><span>GPU 1 (RTX 2060S 8GB)</span><span id="txt-vram-gpu1">-- / 8192 MB</span></div>
+      <progress id="bar-vram-gpu1" class="gpu1" max="100" value="0"></progress>
+    </section>
+
+    <!-- Host System Load -->
+    <section class="panel">
+      <h2>Host Hardware</h2>
+      <div class="stat-row"><span>Intel Core i5-8600</span><span id="txt-cpu">--%</span></div>
+      <progress id="bar-cpu" max="100" value="0"></progress>
+
+      <div class="stat-row"><span>DDR4 Host RAM</span><span id="txt-ram">-- / 16 GB</span></div>
+      <progress id="bar-ram" max="100" value="0"></progress>
+
+      <div class="stat-row"><span>Crucial SSD (Workspace)</span><span id="txt-disk">--%</span></div>
+      <progress id="bar-disk" max="100" value="0"></progress>
+    </section>
+
+    <!-- Engine Control -->
+    <section class="panel">
+      <h2>llama-server Lifecycle (Port 8080)</h2>
+      <div style="margin-bottom:10px;">
+        <label style="font-size:11px; color:var(--muted); display:block; margin-bottom:4px;">Active GGUF Model</label>
+        <select id="model-select" onchange="switchModel()"></select>
+      </div>
+      <div style="display:flex; gap:8px;">
+        <button id="btn-start" class="primary" style="flex:1" onclick="controlLlama('start')">▶ Start LLM</button>
+        <button id="btn-stop" class="danger" style="flex:1" onclick="controlLlama('stop')">■ Stop LLM</button>
+        <button style="padding:6px 12px" title="Restart Service" onclick="controlLlama('restart')">🔄</button>
+      </div>
+    </section>
+  </aside>
+
+  <section id="workspace">
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+      <h2 style="font-size:12px; text-transform:uppercase; letter-spacing:0.6px; color:var(--muted);">llama-server System Logs (Last 45 lines)</h2>
+      <button onclick="fetchLogs()" style="font-size:11px; padding:4px 8px;">Refresh Logs</button>
+    </div>
+    <div id="log-output" class="log-container">Loading journalctl logs...</div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+
+async function updateStats() {
+  try {
+    const res = await fetch('/api/stats');
+    const d = await res.json();
+    
+    // CPU & RAM
+    $('bar-cpu').value = d.cpu.percent;
+    $('txt-cpu').textContent = Math.round(d.cpu.percent) + '% ' + (d.cpu.temp_c ? d.cpu.temp_c + '°C' : '');
+    $('bar-ram').value = d.ram.percent;
+    $('txt-ram').textContent = d.ram.used_gb + ' / ' + d.ram.total_gb + ' GB';
+    $('bar-disk').value = d.disk.percent;
+    $('txt-disk').textContent = Math.round(d.disk.percent) + '% (' + d.disk.used_gb + '/' + d.disk.total_gb + 'G)';
+
+    // Combined VRAM Pool
+    if (d.vram_pool) {
+      $('bar-vram-pool').value = d.vram_pool.percent;
+      $('txt-vram-pool').textContent = d.vram_pool.used_gb + ' / ' + d.vram_pool.total_gb + ' GB (' + d.vram_pool.percent + '%)';
+    }
+
+    // Individual GPUs
+    if (d.gpus && d.gpus[0]) {
+      const g0 = d.gpus[0];
+      $('bar-vram-gpu0').value = g0.mem_percent;
+      $('txt-vram-gpu0').textContent = g0.mem_used_mb + ' / ' + g0.mem_total_mb + ' MB (' + g0.mem_percent + '%)';
+    }
+    if (d.gpus && d.gpus[1]) {
+      const g1 = d.gpus[1];
+      $('bar-vram-gpu1').value = g1.mem_percent;
+      $('txt-vram-gpu1').textContent = g1.mem_used_mb + ' / ' + g1.mem_total_mb + ' MB (' + g1.mem_percent + '%)';
+    }
+  } catch(e) {}
+}
+
+async function ping() {
+  try {
+    const res = await fetch('/api/health?llama_url=http://127.0.0.1:8080');
+    const d = await res.json();
+    $('badge-llama').textContent = d.llama ? 'LLM: Ready (8080)' : 'LLM: Offline';
+    $('badge-llama').className = 'badge ' + (d.llama ? 'ok' : 'err');
+    $('btn-start').disabled = d.llama;
+    $('btn-stop').disabled = !d.llama;
+  } catch(e) {
+    $('badge-llama').textContent = 'LLM: Offline';
+    $('badge-llama').className = 'badge err';
+  }
+}
+
+async function loadModels() {
+  try {
+    const res = await fetch('/api/models');
+    const d = await res.json();
+    const sel = $('model-select');
+    sel.innerHTML = '';
+    d.models.forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = m.name;
+      opt.textContent = m.name + ' (' + m.size_gb + 'G)';
+      if (m.active) opt.selected = true;
+      sel.appendChild(opt);
+    });
+  } catch(e) {}
+}
+
+async function controlLlama(action) {
+  if (action === 'start') $('btn-start').disabled = true;
+  if (action === 'stop') $('btn-stop').disabled = true;
+  try {
+    await fetch(`/api/llama/${action}`, {method: 'POST'});
+  } catch(e) {}
+  setTimeout(() => { ping(); fetchLogs(); }, action === 'stop' ? 1200 : 3500);
+}
+
+async function switchModel() {
+  const model = $('model-select').value;
+  await fetch('/api/switch_model', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({model_name: model})
+  });
+  setTimeout(() => { loadModels(); ping(); fetchLogs(); }, 3500);
+}
+
+async function fetchLogs() {
+  try {
+    const res = await fetch('/api/llama/logs');
+    const d = await res.json();
+    $('log-output').textContent = d.logs || 'No recent journalctl logs for llama-server.';
+    $('log-output').scrollTop = $('log-output').scrollHeight;
+  } catch(e) {}
+}
+
+setInterval(updateStats, 1500);
+setInterval(ping, 4000);
+updateStats();
+ping();
+loadModels();
+fetchLogs();
+</script>
+</body>
+</html>
