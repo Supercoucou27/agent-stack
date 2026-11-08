@@ -4,7 +4,9 @@ import os
 import shutil
 import socket
 import subprocess
+import time
 from pathlib import Path
+from typing import Optional
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 import httpx
@@ -201,20 +203,51 @@ exec "$LLAMA_BIN" \\
     subprocess.Popen(["sudo", "systemctl", "restart", "llama-server"])
     return {"ok": True, "active": model_name}
 
+def _wait_llama_state(target_state: str, timeout: int = 60) -> tuple[bool, str, Optional[str]]:
+    """Attends que llama-server atteigne l'état souhaité (active/inactive)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            res = subprocess.run(
+                ["sudo", "systemctl", "is-active", "llama-server"],
+                capture_output=True, text=True, timeout=10
+            )
+            state = res.stdout.strip()
+            if state == target_state:
+                return True, state, None
+        except Exception:
+            pass
+        time.sleep(0.5)
+    res = subprocess.run(["sudo", "systemctl", "is-active", "llama-server"], capture_output=True, text=True, timeout=10)
+    return False, res.stdout.strip(), res.stderr.strip()
+
+
 @app.post("/api/llama/start")
 async def start_llama():
-    subprocess.Popen(["sudo", "systemctl", "start", "llama-server"])
-    return {"ok": True}
+    subprocess.run(["sudo", "systemctl", "daemon-reload"], capture_output=True, timeout=30)
+    subprocess.run(["sudo", "systemctl", "start", "llama-server"], capture_output=True, timeout=60)
+    ok, state, err = _wait_llama_state("active", timeout=90)
+    if not ok:
+        return JSONResponse({"ok": False, "state": state, "error": err or "llama-server n'est pas passé 'active'"}, status_code=500)
+    return {"ok": True, "state": state}
+
 
 @app.post("/api/llama/stop")
 async def stop_llama():
-    subprocess.Popen(["sudo", "systemctl", "stop", "llama-server"])
-    return {"ok": True}
+    subprocess.run(["sudo", "systemctl", "stop", "llama-server"], capture_output=True, timeout=60)
+    ok, state, err = _wait_llama_state("inactive", timeout=60)
+    if not ok:
+        return JSONResponse({"ok": False, "state": state, "error": err or "llama-server n'est pas passé 'inactive'"}, status_code=500)
+    return {"ok": True, "state": state}
+
 
 @app.post("/api/llama/restart")
 async def restart_llama():
-    subprocess.Popen(["sudo", "systemctl", "restart", "llama-server"])
-    return {"ok": True}
+    subprocess.run(["sudo", "systemctl", "restart", "llama-server"], capture_output=True, timeout=60)
+    ok, state, err = _wait_llama_state("active", timeout=90)
+    if not ok:
+        return JSONResponse({"ok": False, "state": state, "error": err or "llama-server n'est pas passé 'active'"}, status_code=500)
+    return {"ok": True, "state": state}
 
 @app.get("/api/llama/logs")
 async def llama_logs():

@@ -214,10 +214,20 @@ async function loadModels() {
 async function controlLlama(action) {
   if (action === 'start') $('btn-start').disabled = true;
   if (action === 'stop') $('btn-stop').disabled = true;
+  const btnId = action === 'start' ? 'btn-start' : 'btn-stop';
   try {
-    await fetch(`/api/llama/${action}`, {method: 'POST'});
-  } catch(e) {}
-  setTimeout(() => { ping(); fetchLogs(); }, action === 'stop' ? 1200 : 3500);
+    const res = await fetch(`/api/llama/${action}`, {method: 'POST'});
+    const d = await res.json();
+    if (d.ok) {
+      setTimeout(() => { ping(); fetchLogs(); }, 1200);
+    } else {
+      alert(d.error || 'Échec du ' + action + ' : ' + d.state);
+    }
+  } catch(e) {
+    alert('Connexion impossible: ' + e);
+  } finally {
+    setTimeout(() => { $('btn-start').disabled = false; $('btn-stop').disabled = false; }, 1500);
+  }
 }
 
 async function switchModel() {
