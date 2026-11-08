@@ -7,6 +7,7 @@ import struct
 import subprocess
 import time
 import re
+import logging
 import threading
 import pty
 import fcntl
@@ -20,6 +21,15 @@ from fastapi import FastAPI, Request, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 import httpx
 import psutil
+
+# ─── Logging Configuration (structured JSON output) ───────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)-8s | %(name)-20s | %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger("agent-stack")
+logger.setLevel(logging.INFO)
 
 app = FastAPI(title="Unified LLM, Hermes & Terminal Deck")
 STACK_DIR = Path(__file__).parent.resolve()
@@ -623,14 +633,25 @@ async def list_files():
 
 # ─── LLM CONFIG (lama.cpp paramètres) ──────────────────────────────────────────
 LLM_PARAMS = {
-    'ctx_size':     {'type': 'int',  'default': 32768, 'min': 2048, 'max': 131072},
-    'n_gpu_layers': {'type': 'int',  'default': 99,    'min': 0,    'max': 999},
-    'tensor_split': {'type': 'str',  'default': '1,1'},
-    'threads':      {'type': 'int',  'default': 6,     'min': 1,    'max': 6},
-    'batch_size':   {'type': 'int',  'default': 2048,  'min': 128,  'max': 8192},
-    'flash_attn':   {'type': 'str',  'default': 'auto', 'values': ['auto', 'on', 'off']},
-    'temperature':  {'type': 'float','default': 0.7,   'min': 0,    'max': 2},
-    'max_tokens':   {'type': 'int',  'default': 2048,  'min': 64,   'max': 16384},
+    'ctx_size':       {'type': 'int',  'default': 32768, 'min': 2048, 'max': 131072},
+    'n_ctx_train':    {'type': 'int',  'default': 32768, 'min': 2048, 'max': 131072},
+    'n_gpu_layers':   {'type': 'int',  'default': 99,    'min': 0,    'max': 999},
+    'tensor_split':   {'type': 'str',  'default': '1,1'},
+    'threads':        {'type': 'int',  'default': 6,     'min': 1,    'max': 6},
+    'batch_size':     {'type': 'int',  'default': 2048,  'min': 128,  'max': 8192},
+    'n_ubatch':       {'type': 'int',  'default': 512,   'min': 64,   'max': 8192},
+    'n_past':         {'type': 'int',  'default': 512,   'min': 64,   'max': 32768},
+    'n_seq_parallel': {'type': 'int',  'default': 1,     'min': 1,    'max': 8},
+    'mlock':          {'type': 'bool', 'default': True},
+    'f16_kv':         {'type': 'bool', 'default': False},
+    'logits_all':     {'type': 'bool', 'default': False},
+    'use_mmap':       {'type': 'bool', 'default': True},
+    'use_mlock':      {'type': 'bool', 'default': False},
+    'numa':           {'type': 'bool', 'default': False},
+    'main_gpu':       {'type': 'int',  'default': 0,     'min': 0,    'max': 1},
+    'flash_attn':     {'type': 'str',  'default': 'auto', 'values': ['auto', 'on', 'off']},
+    'temperature':    {'type': 'float','default': 0.7,   'min': 0,    'max': 2},
+    'max_tokens':     {'type': 'int',  'default': 2048,  'min': 64,   'max': 16384},
 }
 LLM_CONFIG_FILE = STACK_DIR / "llm_config.yaml"
 LLM_CONFIG_DELETE_ON_START = False
@@ -730,13 +751,36 @@ async def llm_set(req: Request):
 
 # ─── HERMES CONFIG ─────────────────────────────────────────────────────────────
 HERMES_KEYS = {
-    'model.default':         {'group': 'model'},
-    'model.base_url':        {'group': 'model'},
-    'model.provider':        {'group': 'model'},
-    'model.context_length':  {'group': 'model'},
-    'agent.max_turns':       {'group': 'agent'},
-    'compression.threshold': {'group': 'agent'},
-    'terminal.backend':      {'group': 'terminal'},
+    'model.default':             {'group': 'model'},
+    'model.base_url':            {'group': 'model'},
+    'model.provider':            {'group': 'model'},
+    'model.context_length':      {'group': 'model'},
+    'agent.max_turns':           {'group': 'agent'},
+    'agent.system_prompt':       {'group': 'agent'},
+    'agent.reasoning_effort':    {'group': 'agent'},
+    'compression.threshold':     {'group': 'agent'},
+    'terminal.backend':          {'group': 'terminal'},
+    'terminal.rows':             {'group': 'terminal'},
+    'terminal.columns':          {'group': 'terminal'},
+    'u8.temperature':            {'group': 'u8'},
+    'u8.hallucination_rate':     {'group': 'u8'},
+    'u8.verbosity':              {'group': 'u8'},
+    'u8.encoding':               {'group': 'u8'},
+    'u8.encoding_version':       {'group': 'u8'},
+    'u8.scalar_dim':             {'group': 'u8'},
+    'u8.qnrm':                   {'group': 'u8'},
+    'u8.scalar_q':               {'group': 'u8'},
+    'u8.qnrm_q':                 {'group': 'u8'},
+    'u8.qs':                     {'group': 'u8'},
+    'u8.qs_q':                   {'group': 'u8'},
+    'u8.qk':                     {'group': 'u8'},
+    'u8.qk_q':                   {'group': 'u8'},
+    'u8.qv':                     {'group': 'u8'},
+    'u8.qv_q':                   {'group': 'u8'},
+    'u8.qo':                     {'group': 'u8'},
+    'u8.qo_q':                   {'group': 'u8'},
+    'u8.wo':                     {'group': 'u8'},
+    'u8.wo_q':                   {'group': 'u8'},
 }
 HERMES_CFG = Path.home() / ".hermes/config.yaml"
 
@@ -881,9 +925,88 @@ async def hermes_guardrail(req: Request):
 
 
 # ─── TERMINAL HERMES (WebSocket) ────────────────────────────────────────────────
+# Security: Token + origin validation on WebSocket handshake
+import secrets
+import time
+from urllib.parse import urlparse
+
+# Load secrets from .env or generate secure defaults
+def _load_secrets():
+    secrets_config = {
+        'ws_token': os.environ.get('HERMES_WS_TOKEN', secrets.token_urlsafe(32)),
+        'allowed_origins': os.environ.get('HERMES_ALLOWED_ORIGINS', 'http://127.0.0.1:8082').split(','),
+    }
+    # Save to .hermes/secrets.json if not already present
+    secrets_file = Path.home() / '.hermes' / 'secrets.json'
+    if not secrets_file.exists():
+        secrets_file.parent.mkdir(parents=True, exist_ok=True)
+        secrets_file.write_text(
+            json.dumps(secrets_config, indent=2),
+            encoding='utf-8'
+        )
+        # Also export to .env for compatibility
+        env_file = Path.home() / '.hermes' / '.env'
+        if not env_file.exists():
+            env_file.parent.mkdir(parents=True, exist_ok=True)
+            env_file.write_text(
+                f"HERMES_WS_TOKEN={secrets_config['ws_token']}\n"
+                f"HERMES_ALLOWED_ORIGINS={secrets_config['allowed_origins'][0]}\n",
+                encoding='utf-8'
+            )
+    try:
+        return json.loads(secrets_file.read_text(encoding='utf-8'))
+    except Exception:
+        return secrets_config
+
+SECRETS = _load_secrets()
+WS_TOKEN = os.environ.get('HERMES_WS_TOKEN', SECRETS['ws_token'])
+default_origins = SECRETS.get('allowed_origins', ['http://127.0.0.1:8082'])
+if isinstance(default_origins, str):
+    default_origins = [o.strip() for o in default_origins.split(',')]
+ALLOWED_ORIGINS = [o.strip() for o in os.environ.get('HERMES_ALLOWED_ORIGINS', default_origins) if o.strip()]
+
+def _validate_ws_token(token: str) -> bool:
+    """Validate WebSocket authentication token."""
+    if not token:
+        return False
+    # Accept token as query param or header token
+    expected = WS_TOKEN
+    if not isinstance(expected, str):
+        expected = str(expected)
+    return secrets.compare_digest(token, expected)
+
+def _validate_origin(origin: str) -> bool:
+    """Validate Origin header against allowlist."""
+    if not origin:
+        return False
+    parsed = urlparse(origin)
+    for allowed in ALLOWED_ORIGINS:
+        if allowed in origin or allowed == parsed.hostname:
+            return True
+    return False
+
 @app.websocket("/ws/hermes")
 async def ws_hermes(websocket: WebSocket):
-    await websocket.accept()
+    # ─── Security: Validate token ───────────────────────────────────────────
+    token = websocket.query_params.get('token')
+    if not _validate_ws_token(token):
+        await websocket.close(code=4401, reason='Unauthorized: invalid token')
+        return
+
+    # ─── Security: Validate Origin ──────────────────────────────────────────
+    origin = websocket.headers.get('origin') or websocket.headers.get('Sec-Origin') or ''
+    if not _validate_origin(origin):
+        await websocket.close(code=4403, reason='Forbidden: invalid origin')
+        return
+
+    # ─── Security: Log connection (structured audit) ────────────────────────
+    logger.info('WS_CONNECT', extra={
+        'ip': websocket.client[0] if websocket.client else 'unknown',
+        'user_agent': websocket.headers.get('User-Agent', 'unknown'),
+        'origin': origin,
+        'token_prefix': token[:8] + '***' if token and len(token) > 8 else token,
+    })
+
     hb = find_hermes_bin()
     if not hb:
         await websocket.send_text("[ERREUR] binaire 'hermes' introuvable.")
