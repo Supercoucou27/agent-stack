@@ -120,6 +120,21 @@
 
 ### Installation
 
+**Option A — Official Hermes Agent Installer (Recommended)**
+
+```bash
+curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+```
+
+This installs the full Hermes Agent stack:
+- **llama-server** (8080) – local Qwen3.8-27B
+- **Hermes Agent** – interactive CLI agent
+- **Dashboard** (web_app.py) – FastAPI on 8082
+- **MCP servers** – configurable tool extensions
+- **Configuration** – `.hermes/secrets.json`
+
+**Option B — Manual Installation**
+
 ```bash
 # Clone the repository
 git clone https://github.com/Supercoucou27/agent-stack.git
@@ -130,7 +145,7 @@ python3 -m venv venv
 source venv/bin/activate
 
 # Install dependencies
-pip install fastapi uvicorn httpx pynvml psutil
+pip install -r requirements.txt
 
 # Create systemd service
 sudo cp agent-web.service /etc/systemd/system/
@@ -143,11 +158,19 @@ sudo systemctl start agent-web
 # Open the dashboard in your browser
 ```
 
-### Available systemd services
+### Prerequisites
+
+- Python 3.10+
+- llama.cpp (built with flash-attention)
+- GPU with ≥ 8 GB VRAM
+
+**Dependencies:** `chromadb==0.4.23`, `requests==2.31.0`, `python-dotenv==1.0.0`, `mcp`, `pynvml`, `psutil`.
+
+**Note:** CrewAI has been removed. The official Hermes Agent installer (`hermes-agent.nousresearch.com`) provides the agent runtime.
+
+## Available systemd services
 - `agent-web` — The dashboard on port 8082
 - `llama-server` — Llama.cpp server (recreated for this project)
-- `llama-bonsai` — Bonsai LLM control unit
-- `llama-qwen-moe` — Qwen MoE model unit
 
 > **Note:** Port 5001 (Bonsai Cluster Control on Flask) is stopped/disabled by design. The dashboard on 8082 is the unified interface.
 
@@ -220,7 +243,8 @@ agent-stack/
 ├── .env                  # Environment variables (gitignored)
 ├── .gitignore            # Git ignore rules
 ├── requirements.txt      # Python dependencies
-├── auto_runtime.py       # Auto-runtime for agent
+├── auto_runtime.py       # Auto-runtime for agent (legacy)
+├── .hermes/             # Hermes Agent runtime (managed by installer)
 ├── start_llama_server.sh # Start script for llama.cpp
 └── models/              # Model weights directory
 ```
