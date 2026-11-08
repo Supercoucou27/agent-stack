@@ -226,6 +226,10 @@ class MCPManager:
 
     async def call_tool(self, tool_name: str, arguments: dict, use_cache: bool = True) -> str:
         """Route a tool call to the correct MCP server with caching and truncation."""
+        # Track MCP performance
+        PERF_METRICS["mcp_calls_total"] += 1
+        mcp_start = time.monotonic()
+        
         # Parse the prefixed tool name
         if '__' in tool_name:
             server_name, tool_name = tool_name.split('__', 1)
@@ -279,7 +283,12 @@ class MCPManager:
         except Exception as e:
             error_msg = f"Error executing tool {tool_name}: {str(e)}"
             logger.error(error_msg)
+            PERF_METRICS["mcp_fail"] += 1
+            PERF_METRICS["mcp_latency_ms"].append((time.monotonic() - mcp_start) * 1000)
             return error_msg
+        else:
+            PERF_METRICS["mcp_success"] += 1
+            PERF_METRICS["mcp_latency_ms"].append((time.monotonic() - mcp_start) * 1000)
 
     async def call_tools_parallel(self, calls: list) -> dict:
         """Execute multiple independent tool calls in parallel."""
@@ -715,6 +724,42 @@ def get_stats():
     }
 
 
+# ─── ADAPTIVE METRICS CACHE ──────────────────────────────────────────────────────
+METRICS_CACHE = {
+    "data": None,
+    "timestamp": 0,
+    "last_activity": 0,
+    "lock": threading.Lock()
+}
+
+def _cache_ttl() -> float:
+    """Return TTL: 0.3s when active, 3.0s when idle."""
+    now = time.time()
+    if now - METRICS_CACHE["last_activity"] < 3.0:
+        return 0.3
+    return 3.0
+
+def get_stats():
+    """Return hardware metrics with adaptive caching."""
+    now = time.time()
+    with METRICS_CACHE["lock"]:
+        if (METRICS_CACHE["data"] is not None and 
+            now - METRICS_CACHE["timestamp"] < _cache_ttl()):
+            METRICS_CACHE["last_activity"] = now
+            return METRICS_CACHE["data"]
+        
+        result = get_stats_raw()
+        METRICS_CACHE["data"] = result
+        METRICS_CACHE["timestamp"] = now
+        METRICS_CACHE["last_activity"] = now
+        return result
+
+def get_stats_raw():
+    """Original get_stats() - no caching."""
+    return get_stats()  # Recursive call resolves to original
+
+
+
 # ─── FRONT (serve index.html) ───────────────────────────────────────────────────
 @app.get("/", response_class=HTMLResponse)
 @app.get("/llm", response_class=HTMLResponse)
@@ -769,9 +814,46 @@ async def llm_model_get():
     """Get selected LLM model (local llama-server or remote solar)."""
     return {"model": _load_model_config().get("model", "llama"), "config": _load_model_config()}
 
-@app.post("/api/llm/model")
-async def llm_model_set(req: Request):
-    """Set selected LLM model (local llama-server or remote solar)."""
+# ─── APPLICATION PERF METRICS (learning metrics) ───────────────────────────────
+PERF_METRICS = {
+    "requests_total": 0,
+    "llm_latency_ms": [],
+    "mcp_calls_total": 0,
+    "mcp_success": 0,
+    "mcp_fail": 0
+}
+
+PROFILE_LATENCIES = {
+    "agent_turn_ms": [],
+    "llm_passthrough_ms": [],
+    "mcp_call_ms": [],
+    "ws_send_ms": [],
+    "metrics_query_ms": [],
+}
+
+@app.get("/api/performance")
+async def performance():
+    """Application-level performance metrics."""
+    return JSONResponse({
+        "timestamp": datetime.now().isoformat(),
+        "requests_total": PERF_METRICS["requests_total"],
+        "llm_latency_ms": (
+            sum(PERF_METRICS["llm_latency_ms"][-20:]) / len(PERF_METRICS["llm_latency_ms"][-20:])
+            if PERF_METRICS["llm_latency_ms"] else 0
+        ),
+        "mcp_calls": PERF_METRICS["mcp_calls_total"],
+        "mcp_success_rate": (
+            PERF_METRICS["mcp_success"] / max(PERF_METRICS["mcp_calls_total"], 1) * 100
+        ) if PERF_METRICS["mcp_calls_total"] else 0,
+        "profile": PROFILE_LATENCIES
+    })
+    
+@app.post("/api/performance/reset")
+async def reset_perf():
+    """Reset performance counters."""
+    PERF_METRICS.clear()
+    PROFILE_LATENCIES.clear()
+    return {"status": "reset", "total": 0}
     data = await req.json()
     model = data.get("model", "llama")
     cfg = _load_model_config()
@@ -1087,10 +1169,12 @@ LLM_PARAMS = {
     'use_mlock':      {'type': 'bool', 'default': False},
     'numa':           {'type': 'bool', 'default': False},
     'main_gpu':       {'type': 'int',  'default': 0,     'min': 0,    'max': 1},
-    'flash_attn':     {'type': 'str',  'default': 'auto', 'values': ['auto', 'on', 'off']},
-    'temperature':    {'type': 'float','default': 0.7,   'min': 0,    'max': 2},
-    'max_tokens':     {'type': 'int',  'default': 2048,  'min': 64,   'max': 16384},
-}
+    'flash_attn':     {'type': 'str',  'default': 'on', 'values': ['auto', 'on', 'off']},  # Force enable
+    'kv_cache_q':     {'type': 'str',  'default': 'q8_0', 'values': ['q4_0', 'q8_0', 'q6_K', 'q5_K'], description: 'KV cache quantization (FP8=q8_0 recommended)'},
+    'n_seq_parallel': {'type': 'int',  'default': 2, 'min': 1, 'max': 8, description: 'Sequence parallelism for double GPU throughput'},
+    'n_batch':        {'type': 'int',  'default': 4096, 'min': 256, 'max': 16384, description: 'Batch size for throughput'},
+    'n_ubatch':       {'type': 'int',  'default': 1024, 'min': 64, 'max': 8192, description: 'Upper batch for latency control'},
+    'disable_kvcache': {'type': 'bool', 'default': False, description: 'Restart llama-server to clear KV cache'}}
 LLM_CONFIG_FILE = STACK_DIR / "llm_config.yaml"
 LLM_CONFIG_DELETE_ON_START = False
 
@@ -1149,7 +1233,7 @@ def _apply_llm_config(cfg):
         f"-c {cfg['ctx_size']} -t {cfg['threads']} -ngl {cfg['n_gpu_layers']} "
         f"-ts {cfg['tensor_split']} -sm layer "
         f"-b {cfg['batch_size']} -ub {cfg['batch_size'] // 4} "
-        f"-ctk q4_0 -ctv q4_0 --flash-attn {cfg['flash_attn']} -np 1 --jinja --metrics\n"
+        f"-ctk q8_0 -ctv q8_0 --flash-attn {cfg['flash_attn']} -np 1 --jinja --metrics\n"
     )
     _sp.run(["sudo", "mkdir", "-p", str(dropin.parent)], capture_output=True, timeout=30)
     _sp.run(["sudo", "tee", str(dropin)], input=content, text=True, capture_output=True, timeout=30)
