@@ -326,21 +326,37 @@ const $ = id => document.getElementById(id);
 async function updateStats() {
   try {
     const res = await fetch('/api/system/metrics');
+    if (!res.ok) {
+      console.error('[updateStats] fetch failed:', res.status, res.statusText);
+      return;
+    }
     const d = await res.json();
-    $('txt-cpu').textContent = Math.round(d.cpu_percent) + '%';
-    $('txt-ram').textContent = d.ram.used_gb + ' / ' + d.ram.total_gb + ' GB';
-    $('txt-disk').textContent = Math.round(d.storage.percent || 0) + '%';
+
+    // CPU
+    $('txt-cpu').textContent = d.cpu_percent.toFixed(1) + '%';
+
+    // RAM
+    $('txt-ram').textContent = d.ram.used_gb.toFixed(2) + ' / ' + d.ram.total_gb.toFixed(2) + ' GB';
+
+    // Disk
+    $('txt-disk').textContent = d.storage.percent.toFixed(1) + '%';
+
+    // GPU VRAM
     if (d.gpus && d.gpus.length) {
-      d.gpus.forEach(g => {
+      for (const g of d.gpus) {
         const div = document.getElementById('txt-vram-gpu' + g.index);
         const bar = document.getElementById('bar-vram-gpu' + g.index);
         if (div && bar) {
-          div.textContent = g.vram_used_mb + ' / ' + g.vram_total_mb + ' MB (' + g.util + '%)';
+          const vramUsedGB = g.vram_used_mb / 1024;
+          const vramTotalGB = g.vram_total_mb / 1024;
+          div.textContent = vramUsedGB.toFixed(2) + ' / ' + vramTotalGB.toFixed(2) + ' GB (' + g.util + '%)';
           bar.value = g.util;
         }
-      });
+      }
     }
-  } catch(e) {}
+  } catch(e) {
+    console.error('[updateStats] error:', e);
+  }
 }
 
 // ─── LLAMA ────────────────────────────────────────────────────────────────────
