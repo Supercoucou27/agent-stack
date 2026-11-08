@@ -23,9 +23,6 @@
 │  - /api/llama/start|stop|restart             │
 │  - /api/llm/model (llama vs solar)           │
 │  - /api/hermes/* (terminal, status, yolo)    │
-│  - /api/ollama/* (ollama control)            │
-│  - /api/cluster/* (Bonsai cluster)           │
-│  - /ws/hermes (interactive terminal WS)      │
 │  - /api/mcp/* (MCP config)                   │
 └──────────────────┬───────────────────────────┘
                    │
@@ -198,7 +195,7 @@ sudo systemctl start agent-web
 - `agent-web` — The dashboard on port 8082
 - `llama-server` — Llama.cpp server (recreated for this project)
 
-> **Note:** Port 5001 (Bonsai Cluster Control on Flask) is stopped/disabled by design. The dashboard on 8082 is the unified interface.
+> **Note:** Bonsai Cluster Control (port 5001) has been removed. The dashboard on 8082 is the unified terminal interface.
 
 ## Configuration
 
@@ -250,11 +247,12 @@ curl -X POST http://127.0.0.1:8082/api/mcp/reload
 | `/api/hermes/send` | POST | Send message to Hermes terminal |
 | `/api/hermes/status` | GET | Hermes status |
 | `/api/hermes/yolo` | GET/POST | Yolo mode |
-| `/api/cluster/status` | GET | Cluster status |
 | `/api/mcp` | GET | List MCP servers |
 | `/api/mcp/add` | POST | Add MCP server |
 | `/api/mcp/toggle` | POST | Toggle MCP server |
 | `/api/mcp/remove` | POST | Remove MCP server |
+| `/api/mcp/reload` | POST | Reload MCP servers |
+| `/api/mcp/test` | GET | MCP health check |
 | `/ws/hermes` | WS | Interactive terminal WebSocket |
 
 ## Files & Directories
