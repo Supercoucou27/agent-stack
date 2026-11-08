@@ -461,6 +461,11 @@ function termLine(html) {
 async function sendTerm() {
   const cmd = $('term-input').value.trim();
   if (!cmd) return;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(cmd);
+    $('term-input').value = '';
+    return;
+  }
   const status = $('term-status');
   status.textContent = 'Agent: en cours…';
   termLine(`<span style="color:#7ee787;">user@tara:~$</span> <span style="color:#89dceb;">${escapeHtml(cmd)}</span>`);
@@ -495,13 +500,47 @@ async function sendTerm() {
     termLine(`<span style="color:#f85149;">❌ ${escapeHtml(e)}</span>`);
     status.textContent = 'Agent: Erreur';
   }
-}
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && e.target.id === 'term-input') {
-    e.preventDefault();
-    sendTerm();
+
+  // ─── TERMINAL WEBSOCKET (real-time) ────────────────────────────────────────────
+  let ws = null;
+  async function connectTerminal() {
+    try {
+      ws = new WebSocket('ws://' + location.host + '/ws/hermes');
+      ws.onopen = () => {
+        $('term-status').textContent = 'Agent: Connecté';
+        $('term-status').style.color = '#7ee787';
+      };
+      ws.onmessage = (e) => {
+        const text = e.data;
+        for (const line of text.split('\n')) {
+          if (line) termLine(parseANSI(line));
+        }
+        $('term-output').scrollTop = $('term-output').scrollHeight;
+      };
+      ws.onclose = () => {
+        $('term-status').textContent = 'Agent: hors-ligne';
+        $('term-status').style.color = '#f85149';
+        setTimeout(connectTerminal, 3000);
+      };
+      ws.onerror = () => {
+        $('term-status').textContent = 'Agent: Erreur';
+        $('term-status').style.color = '#f85149';
+      };
+    } catch (e) {
+      $('term-status').textContent = 'Agent: Erreur';
+      $('term-status').style.color = '#f85149';
+      setTimeout(connectTerminal, 3000);
+    }
   }
-});
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && e.target.id === 'term-input') {
+      e.preventDefault();
+      sendTerm();
+    }
+  });
+  document.addEventListener('DOMContentLoaded', () => {
+    connectTerminal();
+  });
 
 // ─── CLUSTER (5001) ──────────────────────────────────────────────────────────
 async function runCluster() {

@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import socket
+import struct
 import subprocess
 import time
 import re
