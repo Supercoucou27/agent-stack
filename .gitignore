@@ -1,0 +1,32 @@
+# Model weights & binaries (avoid multi-GB commits)
+models/
+*.gguf
+*.bin
+*.pt
+*.safetensors
+wheels/
+
+# Virtual environment & package managers
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Vector database & persistent memory
+chroma/
+*.sqlite3
+
+# Logs & ephemeral workspace caches
+*.log
+logs/
+.hermes/
+cache/
+.pytest_cache/
+.coverage
+
+# System & editor metadata
+.DS_Store
+.idea/
+.vscode/

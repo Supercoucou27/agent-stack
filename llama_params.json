@@ -1,0 +1,23 @@
+{
+  "server": {
+    "model": "/home/tara/agent-stack/models/Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf",
+    "ctx_size": 131072,
+    "n_gpu_layers": 99,
+    "split_mode": "layer",
+    "cache_type_k": "q4_0",
+    "cache_type_v": "q4_0",
+    "flash_attn": "on",
+    "batch_size": 2048,
+    "ubatch_size": 512,
+    "threads": 6,
+    "host": "0.0.0.0",
+    "port": 8080
+  },
+  "sampling": {
+    "temperature": 0.2,
+    "top_p": 0.95,
+    "top_k": 40,
+    "repeat_penalty": 1.1,
+    "max_tokens": 2048
+  }
+}

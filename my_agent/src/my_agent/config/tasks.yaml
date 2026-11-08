@@ -1,0 +1,17 @@
+summarize:
+  description: >
+    Liste les fichiers du répertoire de travail (outil list_files, sans argument).
+    Pour chaque fichier texte, lis-le avec read_file (nom relatif).
+    Produis un résumé en français du contenu global.
+  expected_output: >
+    Un résumé en français du contenu du répertoire.
+  agent: file_assistant
+
+report_and_remember:
+  description: >
+    Crée un fichier 'rapport.md' avec write_file : titre, résumé, date.
+    Mémorise-le avec remember (source='rapport').
+    Puis utilise recall avec 'projet agent' et cite le résultat.
+  expected_output: >
+    Confirmation en français : fichier écrit, contenu mémorisé, résultat recall.
+  agent: file_assistant
