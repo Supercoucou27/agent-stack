@@ -104,7 +104,7 @@ except ImportError:
 
 
 class MCPManager:
-    """Manages MCP server lifecycle inside Hermes agent."""
+    """Manages MCP server lifecycle inside Hermes agent with performance optimizations."""
 
     def __init__(self, config_path: Path = None):
         self.config_path = config_path or (Path.home() / '.hermes' / 'mcp_config.json')
@@ -112,6 +112,9 @@ class MCPManager:
         self._exit_stack = None
         self.tools = []
         self._running = False
+        self._tool_cache = {}
+        self._result_cache = {}
+        self._cache_ttl = 300  # seconds
 
     def _load_config(self) -> dict:
         """Load MCP server configuration from JSON file."""
@@ -144,20 +147,16 @@ class MCPManager:
         self._exit_stack = AsyncExitStack()
         self.sessions = {}
         self.tools = []
-        config = self._load_config()
-        if not config:
-            config = self._load_config_from_env()
+        config = self._load_config() or self._load_config_from_env()
 
         for server_name, params in config.items():
             try:
-                # Setup standard I/O connection
                 server_params = StdioServerParameters(
                     command=params.get("command", ""),
                     args=params.get("args", []),
                     env=params.get("env")
                 )
 
-                # Enter the context manager to keep the process alive
                 read_stream, write_stream = await self._exit_stack.enter_async_context(
                     stdio_client(server_params)
                 )
@@ -177,6 +176,7 @@ class MCPManager:
     async def _discover_tools(self):
         """Fetch tools from all connected MCP servers and prefix them."""
         self.tools = []
+        self._tool_cache.clear()
         for server_name, session in self.sessions.items():
             try:
                 response = await session.list_tools()
@@ -190,23 +190,46 @@ class MCPManager:
                             "parameters": tool.inputSchema or {}
                         },
                         "server": server_name,
-                        "original_name": tool.name
+                        "original_name": tool.name,
+                        "cached": True
                     })
-                    logger.debug(f'[MCP] Registered tool: {tool_id}')
+                    # Cache tool definitions
+                    self._tool_cache[tool_id] = {
+                        "name": tool.name,
+                        "description": tool.description or f"Tool from {server_name}",
+                        "input_schema": tool.inputSchema or {}
+                    }
             except Exception as e:
                 logger.error(f'[MCP] Failed to list tools for {server_name}: {e}')
 
     def get_all_tools(self) -> list:
-        """Synchronous version for initial loading."""
+        """Synchronous version for initial loading - returns cached tools."""
         return self.tools
 
-    async def call_tool(self, tool_name: str, arguments: dict):
-        """Route a tool call to the correct MCP server."""
+    async def _get_tool_definition(self, tool_id: str) -> Optional[dict]:
+        """Get tool definition with caching (progressive discovery)."""
+        if tool_id in self._tool_cache:
+            return self._tool_cache[tool_id]
+        # Fallback to discovery
+        return next((t for t in self.tools if t["function"]["name"] == tool_id), None)
+
+    def get_tool_hash(self, tool_name: str, args: dict) -> str:
+        """Generate cache key for tool call arguments."""
+        return f"{tool_name}:{json.dumps(args, sort_keys=True)}"
+
+    def _truncate_result(self, result: str, max_tokens: int = 100) -> str:
+        """Truncate tool results to prevent context bloat."""
+        token_limit = max_tokens * 4  # ~4 chars per token
+        if len(result) > token_limit:
+            return result[:token_limit].rsplit(' ', 1)[0] + ' ... [truncated]'
+        return result
+
+    async def call_tool(self, tool_name: str, arguments: dict, use_cache: bool = True) -> str:
+        """Route a tool call to the correct MCP server with caching and truncation."""
         # Parse the prefixed tool name
         if '__' in tool_name:
             server_name, tool_name = tool_name.split('__', 1)
         else:
-            # Backward compatibility - try direct match
             server_name = None
             for sn in self.sessions:
                 if tool_name.startswith(sn + '__'):
@@ -225,16 +248,60 @@ class MCPManager:
                 return f"Security Error: Tool '{tool_name}' not in allowlist"
 
         session = self.sessions[server_name]
+
+        # Try cache first
+        if use_cache:
+            cache_key = self.get_tool_hash(tool_name, arguments)
+            if cache_key in self._result_cache:
+                result, timestamp = self._result_cache[cache_key]
+                if time.time() - timestamp < self._cache_ttl:
+                    logger.debug(f'[MCP] Cache hit: {tool_name}')
+                    return result
+
         try:
             result = await session.call_tool(tool_name, arguments)
-            # Extract text content
             if hasattr(result, 'content'):
                 for c in result.content:
                     if isinstance(c, TextContent):
-                        return c.text
-            return str(result)
+                        result = c.text
+                        break
+            else:
+                result = str(result)
+
+            # Truncate result to prevent context bloat
+            result = self._truncate_result(result, max_tokens=100)
+            logger.debug(f'[MCP] Tool executed: {tool_name}')
+
+            if use_cache:
+                self._result_cache[cache_key] = (result, time.time())
+
+            return result
         except Exception as e:
-            return f"Error executing tool {tool_name}: {str(e)}"
+            error_msg = f"Error executing tool {tool_name}: {str(e)}"
+            logger.error(error_msg)
+            return error_msg
+
+    async def call_tools_parallel(self, calls: list) -> dict:
+        """Execute multiple independent tool calls in parallel."""
+        async def _call(call):
+            tool_name, args = call
+            cache_key = self.get_tool_hash(tool_name, args)
+            if cache_key in self._result_cache:
+                result, _ = self._result_cache[cache_key]
+                return tool_name, result
+            result = await self.call_tool(tool_name, args)
+            return tool_name, result
+
+        tasks = [_call(call) for call in calls]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        output = {}
+        for tool_name, result in results:
+            if isinstance(result, Exception):
+                output[tool_name] = f"Error: {str(result)}"
+            else:
+                output[tool_name] = result
+        return output
 
     async def close(self):
         """Shut down all MCP server sessions."""
@@ -246,31 +313,97 @@ class MCPManager:
     def is_available(self) -> bool:
         return MCP_AVAILABLE
 
+
+        return MCP_AVAILABLE
+
 # ─── HERMES AGENT WITH MCP INTEGRATION ──────────────────────────────────────────
 class HermesMCPModerator:
     """
-    Hermes agent with integrated MCP support.
-    Transforms Hermes into an MCP Host/Client that:
-    1. Spawns MCP servers
-    2. Discovers their tools
-    3. Feeds tools to the LLM
-    4. Routes LLM tool calls back to MCP servers
-    5. Maintains WebSocket connection to UI
+    Hermes agent with integrated MCP support and performance optimizations.
+    - Progressive tool discovery (search/inspect pattern)
+    - Intelligent caching of tool definitions and results
+    - Response truncation to prevent context bloat
+    - Parallel execution of independent tool calls
     """
 
-    def __init__(self, llm_client, websocket, mcp_manager=None):
+    def __init__(self, llm_client, websocket, mcp_manager=None, use_progressive_discovery: bool = True):
         self.llm = llm_client
         self.ws = websocket
         self.mcp = mcp_manager or MCPManager()
         self.history = []
         self._running = False
         self.busy = False
+        self.use_progressive_discovery = use_progressive_discovery
+        # Progressive discovery tools (meta-tools)
+        self._meta_tools = []
+        if use_progressive_discovery:
+            self._meta_tools = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "mcp_search_tools",
+                        "description": "Search for available MCP tools by keyword. Returns matching tool names and one-line descriptions.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {
+                                    "type": "string",
+                                    "description": "Search query (e.g., 'file', 'git', 'read')"
+                                }
+                            },
+                            "required": ["query"],
+                            "additionalProperties": False
+                        }
+                    }
+                },
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "mcp_describe_tool",
+                        "description": "Get detailed information about a specific MCP tool including input/output schema.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "tool_name": {
+                                    "type": "string",
+                                    "description": "Full tool name (e.g., 'filesystem__read')"
+                                }
+                            },
+                            "required": ["tool_name"],
+                            "additionalProperties": False
+                        }
+                    }
+                }
+            ]
+        # Build tool description for system prompt
+        if self.mcp.tools:
+            self._build_tool_description()
+
+    def _build_tool_description(self):
+        """Build the tool description string for the system prompt."""
+        if not self.mcp.tools:
+            return
+        # Split tools into categories for better discoverability
+        tools_by_server = {}
+        for t in self.mcp.tools:
+            server = t.get("server", "unknown")
+            if server not in tools_by_server:
+                tools_by_server[server] = []
+            tools_by_server[server].append(t["function"]["name"])
+
+        desc = "\n\nAvailable MCP Tools:"
+        for server, tool_names in tools_by_server.items():
+            desc += f'\n  [{server}]'
+            for name in tool_names:
+                desc += f'\n    - {name}'
+        self.tool_description = desc
 
     async def start(self):
         """Initialize MCP and start listening."""
         await self.mcp.initialize()
+        if self.mcp.tools:
+            logger.info(f'[MCP] Hermes MCP tools loaded: {len(self.mcp.tools)}')
         self._running = True
-        logger.info(f'[MCP] Total tools available: {len(self.mcp.tools)}')
         await self.listen_ws()
 
     async def listen_ws(self):
@@ -286,14 +419,23 @@ class HermesMCPModerator:
         self.history.append({"role": "user", "content": user_input})
         self.busy = True
         await self.ws.send_json({"status": "thinking", "message": "Reasoning..."})
+
         self.busy = False
+        # Check for progressive discovery meta-tools
+        self.history.append({"role": "system", "content": getattr(self, 'tool_description', 'You are an autonomous local agent.')})
 
         while True:
             try:
-                # 1. Send prompt + tools to LLM
+                # Determine what tools to send to LLM
+                if self.use_progressive_discovery and self._meta_tools:
+                    # Send meta-tools (search/describe) to the model first
+                    tools_to_send = self._meta_tools
+                else:
+                    tools_to_send = self.mcp.get_all_tools() if self.mcp else None
+
                 response = await self.llm.chat(
                     messages=self.history,
-                    tools=self.mcp.get_all_tools()
+                    tools=tools_to_send
                 )
             except Exception as e:
                 await self.ws.send_json({"status": "error", "message": str(e)})
@@ -301,37 +443,76 @@ class HermesMCPModerator:
 
             message = response.choices[0].message
 
-            # 2. Check if LLM wants to use a tool
-            if message.tool_calls:
-                self.history.append(message)
-                self.busy = True
-                await self.ws.send_json({"status": "executing_tools", "tools": len(message.tool_calls)})
+            # Handle progressive discovery
+            if self.use_progressive_discovery:
+                if message.tool_calls:
+                    self.history.append(message)
+                    self.busy = True
 
-                for tool_call in message.tool_calls:
-                    tool_name = tool_call.function.name
-                    args = json.loads(tool_call.function.arguments)
+                    for tool_call in message.tool_calls:
+                        tool_name = tool_call.function.name
+                        args = json.loads(tool_call.function.arguments)
 
-                    # Execute via MCP
-                    result = await self.mcp.call_tool(tool_name, args)
+                        # Handle meta-tools
+                        if tool_name == "mcp_search_tools":
+                            query = args.get("query", "")
+                            results = []
+                            for t in self.mcp.tools:
+                                if query.lower() in t["function"]["name"].lower() or query.lower() in (t["function"]["description"] or "").lower():
+                                    results.append(f"  - {t['function']['name']}: {t['function']['description']}")
+                            response_text = "\n".join(results) if results else "No matching tools found."
+                            await self.ws.send_json({"status": "meta_result", "result": response_text})
+                            self.history.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "name": tool_name,
+                                "content": response_text
+                            })
+                        elif tool_name == "mcp_describe_tool":
+                            full_name = args.get("tool_name", "")
+                            tool_def = await self.mcp._get_tool_definition(full_name)
+                            if tool_def:
+                                desc = f"Tool: {full_name}\nDescription: {tool_def['description']}\nInput Schema: {json.dumps(tool_def['input_schema'], indent=2)}"
+                            else:
+                                desc = f"Tool not found: {full_name}"
+                            await self.ws.send_json({"status": "meta_result", "result": desc})
+                            self.history.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "name": tool_name,
+                                "content": desc
+                            })
+                        else:
+                            # Regular tool call
+                            result = await self.mcp.call_tool(tool_name, args)
+                            self.history.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "name": tool_name,
+                                "content": result
+                            })
+                            await self.ws.send_json({
+                                "status": "tool_executed",
+                                "tool": tool_name,
+                                "result_preview": result[:100] + "..." if len(result) > 100 else result
+                            })
 
-                    # Feed result back to LLM
-                    self.history.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "name": tool_name,
-                        "content": result
-                    })
+                    self.busy = False
+                    # Continue loop to get LLM's next action
+                    continue
 
-                self.busy = False
-                # Continue loop to get next LLM response
-            else:
-                # No tool calls - just text response
+            # No tool calls, just text response
+            if message.content:
                 self.history.append({"role": "assistant", "content": message.content})
                 await self.ws.send_json({
                     "status": "complete",
                     "response": message.content
                 })
-                break
+            break
+
+    async def shutdown(self):
+        self._running = False
+        await self.mcp.close()
 
     async def shutdown(self):
         self._running = False
@@ -1355,8 +1536,13 @@ async def api_agent_chat(req: Request):
         logger.warning(f'[MCP] Failed to initialize: {e}')
         mcp_manager = None
 
-    # Create Hermes agent with MCP support
-    agent = HermesMCPModerator(llm_client=None, websocket=None, mcp_manager=mcp_manager)
+    # Create Hermes agent with MCP support (optimized with progressive discovery)
+    agent = HermesMCPModerator(
+        llm_client=None,
+        websocket=None,
+        mcp_manager=mcp_manager,
+        use_progressive_discovery=True  # Uses meta-tools: search, describe
+    )
 
     # Set up the conversation
     agent.history = [
