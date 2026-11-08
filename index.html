@@ -125,12 +125,12 @@
       </div>
       <div style="display:flex; gap:6px; margin-bottom:6px; align-items:center;">
         <span style="font-size:11px; color:var(--muted);">LLM :</span>
-        <span id="llm-model-label" style="font-size:11px; color:#7ee787; font-weight:500;">LLM: Local llama (Qwen3.8-27B)</span>
+        <span id="llm-model-label" style="font-size:11px; color:var(--muted); font-weight:500;">LLM: Local llama (Qwen3.8-27B)</span>
         <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);">
-          <input type="radio" name="llm-model" value="llama" checked onchange="saveLlmModel()"> Local llama
+          <input type="radio" name="llm-model" id="llm-model-llama" value="llama" checked onchange="saveLlmModel()"> Local llama
         </label>
         <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);">
-          <input type="radio" name="llm-model" value="solar" onchange="saveLlmModel()"> Solar Mini 4 (free)
+          <input type="radio" name="llm-model" id="llm-model-solar" value="solar" onchange="saveLlmModel()"> Solar Mini 4 (free)
         </label>
       </div>
       <div id="chat-log" style="font-family:ui-monospace,monospace; font-size:11px; white-space:pre-wrap; color:#7ee787; min-height:48px;"></div>
@@ -557,7 +557,8 @@ async function switchModel() {
 
 // ─── LLM MODEL (solar vs llama) ─────────────────────────────────────────────────
 async function saveLlmModel() {
-  const model = $('llm-model').value;
+  const selected = document.querySelector('input[name="llm-model"]:checked');
+  const model = selected ? selected.value : 'llama';
   try {
     const res = await fetch('/api/llm/model', {
       method: 'POST',
