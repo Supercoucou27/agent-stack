@@ -76,6 +76,24 @@
       </div>
     </section>
 
+    <!-- 11. MCP Points (inside Hermes agent) -->
+    <section class="panel" style="border-color: var(--purple);">
+      <h2 style="color: var(--purple);">🔌 MCP Points</h2>
+      <div id="mcp-server-list" style="max-height:150px; overflow-y:auto;">
+        <div class="stat-row" style="margin-bottom:6px;"><strong>No servers configured</strong></div>
+      </div>
+      <div style="display:flex; gap:6px;">
+        <input id="mcp-name" type="text" placeholder="Server name" style="flex:1;">
+        <button class="primary" onclick="addMcpServer()">+ Add</button>
+      </div>
+      <div style="margin-top:8px; display:flex; gap:6px;">
+        <button onclick="removeMcpServer()">✕ Remove</button>
+        <button onclick="toggleMcpServer()">▶/⏸ Toggle</button>
+        <button onclick="reloadMcp()">🔄 Reload</button>
+      </div>
+    </section>
+  </aside>
+
     <!-- 2. Dual-GPU VRAM Telemetry -->
     <section class="panel">
       <h2>VRAM Allocation</h2>
@@ -154,11 +172,15 @@
     <section class="panel">
       <h2>⚙ LLM Configuration</h2>
       <div class="stat-row" style="margin-bottom:6px;">
-        <span>Context size</span>
+        <span>Context size (ctx)</span>
         <input id="llm-ctx" type="number" value="32768" min="2048" max="131072" style="width:80px;">
       </div>
       <div class="stat-row" style="margin-bottom:6px;">
-        <span>GPU layers</span>
+        <span>Context train (n_ctx_train)</span>
+        <input id="llm-ctx_train" type="number" value="32768" min="2048" max="131072" style="width:80px;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>GPU layers (n_gpu_layers)</span>
         <input id="llm-ngpu" type="number" value="99" min="0" max="999" style="width:80px;">
       </div>
       <div class="stat-row" style="margin-bottom:6px;">
@@ -166,20 +188,52 @@
         <input id="llm-ts" type="text" value="1,1" style="width:80px;">
       </div>
       <div class="stat-row" style="margin-bottom:6px;">
-        <span>Threads</span>
+        <span>Threads (n_threads)</span>
         <input id="llm-threads" type="number" value="6" min="1" max="6" style="width:80px;">
       </div>
       <div class="stat-row" style="margin-bottom:6px;">
-        <span>Batch size</span>
+        <span>Batch size (n_batch)</span>
         <input id="llm-batch" type="number" value="2048" min="128" max="8192" style="width:80px;">
       </div>
       <div class="stat-row" style="margin-bottom:6px;">
-        <span>Temperature</span>
-        <input id="llm-temp" type="number" value="0.7" min="0" max="2" step="0.1" style="width:80px;">
+        <span>Upper batch (n_ubatch)</span>
+        <input id="llm-ubatch" type="number" value="512" min="64" max="8192" style="width:80px;">
       </div>
       <div class="stat-row" style="margin-bottom:6px;">
-        <span>Max tokens</span>
-        <input id="llm-maxtok" type="number" value="2048" min="64" max="16384" style="width:80px;">
+        <span>Past (n_past)</span>
+        <input id="llm-past" type="number" value="512" min="64" max="32768" style="width:80px;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>Seq parallel (n_seq_parallel)</span>
+        <input id="llm-seqpar" type="number" value="1" min="1" max="8" style="width:80px;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>MLock</span>
+        <input id="llm-mlock" type="checkbox" style="width:auto;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>FP16 KV (f16_kv)</span>
+        <input id="llm-f16kv" type="checkbox" style="width:auto;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>Logits all (logits_all)</span>
+        <input id="llm-logits" type="checkbox" style="width:auto;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>Use mmap (use_mmap)</span>
+        <input id="llm-mmap" type="checkbox" style="width:auto;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>Use mlock (use_mlock)</span>
+        <input id="llm-mlock2" type="checkbox" style="width:auto;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>NUMA (numa)</span>
+        <input id="llm-numa" type="checkbox" style="width:auto;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>Main GPU (main_gpu)</span>
+        <input id="llm-maingpu" type="number" value="0" min="0" max="1" style="width:80px;">
       </div>
       <div class="stat-row" style="margin-bottom:6px;">
         <span>Flash attn</span>
@@ -189,11 +243,37 @@
           <option value="off">off</option>
         </select>
       </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>Temperature</span>
+        <input id="llm-temp" type="number" value="0.7" min="0" max="2" step="0.1" style="width:80px;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>Max tokens (max_tokens)</span>
+        <input id="llm-maxtok" type="number" value="2048" min="64" max="16384" style="width:80px;">
+      </div>
       <div style="display:flex; gap:6px;">
         <button class="primary" onclick="applyLlmConfig()">▶ Appliquer + redémarrer</button>
         <button onclick="resetLlmConfig()">↺ Reset</button>
       </div>
     </section>
+
+    <!-- 11. MCP Points (inside Hermes agent) -->
+    <section class="panel" style="border-color: var(--purple);">
+      <h2 style="color: var(--purple);">🔌 MCP Points</h2>
+      <div id="mcp-server-list" style="max-height:150px; overflow-y:auto;">
+        <div class="stat-row" style="margin-bottom:6px;"><strong>No servers configured</strong></div>
+      </div>
+      <div style="display:flex; gap:6px;">
+        <input id="mcp-name" type="text" placeholder="Server name" style="flex:1;">
+        <button class="primary" onclick="addMcpServer()">+ Add</button>
+      </div>
+      <div style="margin-top:8px; display:flex; gap:6px;">
+        <button onclick="removeMcpServer()">✕ Remove</button>
+        <button onclick="toggleMcpServer()">▶/⏸ Toggle</button>
+        <button onclick="reloadMcp()">🔄 Reload</button>
+      </div>
+    </section>
+  </aside>
 
     <!-- 10. Hermes Configuration -->
     <section class="panel">
@@ -215,16 +295,112 @@
         <input id="hermes-context" type="number" value="32768" min="1024" style="width:80px;">
       </div>
       <div class="stat-row" style="margin-bottom:6px;">
-        <span>Max turns</span>
+        <span>Max turns (agent.max_turns)</span>
         <input id="hermes-maxturns" type="number" value="50" min="10" style="width:80px;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>System prompt</span>
+        <textarea id="hermes-prompt" rows="2" style="width:100%; font-family:ui-monospace,monospace; font-size:11px;" placeholder="System prompt for the agent"></textarea>
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>Reasoning effort</span>
+        <select id="hermes-reasoning" style="width:80px;">
+          <option value="high">high</option>
+          <option value="medium">medium</option>
+          <option value="low">low</option>
+        </select>
       </div>
       <div class="stat-row" style="margin-bottom:6px;">
         <span>Compression threshold</span>
         <input id="hermes-compress" type="number" value="0.5" step="0.1" min="0" max="1" style="width:80px;">
       </div>
       <div class="stat-row" style="margin-bottom:6px;">
+        <span>Terminal rows</span>
+        <input id="hermes-termrows" type="number" value="28" min="10" style="width:80px;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>Terminal columns</span>
+        <input id="hermes-termcols" type="number" value="110" min="40" style="width:80px;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
         <span>Terminal backend</span>
         <input id="hermes-termbackend" type="text" value="ws" style="width:80px;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>U8 temperature</span>
+        <input id="u8-temp" type="number" value="0.7" min="0" max="2" step="0.05" style="width:80px;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>U8 hallucination rate</span>
+        <input id="u8-hallucination" type="number" value="0.05" min="0" max="1" step="0.01" style="width:80px;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>U8 verbosity</span>
+        <input id="u8-verbosity" type="number" value="1" min="-2" max="2" style="width:80px;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>U8 encoding</span>
+        <input id="u8-encoding" type="text" value="ggml" style="width:80px;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>U8 encoding version</span>
+        <input id="u8-encoding-version" type="text" value="v1" style="width:80px;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>U8 scalar dim</span>
+        <input id="u8-scalar-dim" type="number" value="32" min="4" style="width:80px;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>U8 qnrm</span>
+        <input id="u8-qnrm" type="number" value="1" min="0" style="width:80px;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>U8 scalar q</span>
+        <input id="u8-scalar-q" type="number" value="0" min="0" style="width:80px;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>U8 qnrm q</span>
+        <input id="u8-qnrm-q" type="number" value="0" min="0" style="width:80px;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>U8 qs (quantization scale)</span>
+        <input id="u8-qs" type="number" value="0" min="0" style="width:80px;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>U8 qs q (scale quantization)</span>
+        <input id="u8-qs-q" type="number" value="0" min="0" style="width:80px;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>U8 qk (quantized key)</span>
+        <input id="u8-qk" type="number" value="0" min="0" style="width:80px;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>U8 qk q (quantized key scale)</span>
+        <input id="u8-qk-q" type="number" value="0" min="0" style="width:80px;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>U8 qv (quantized value)</span>
+        <input id="u8-qv" type="number" value="0" min="0" style="width:80px;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>U8 qv q (quantized value scale)</span>
+        <input id="u8-qv-q" type="number" value="0" min="0" style="width:80px;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>U8 qo (quantized output)</span>
+        <input id="u8-qo" type="number" value="0" min="0" style="width:80px;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>U8 qo q (quantized output scale)</span>
+        <input id="u8-qo-q" type="number" value="0" min="0" style="width:80px;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>U8 wo (quantized weight output)</span>
+        <input id="u8-wo" type="number" value="0" min="0" style="width:80px;">
+      </div>
+      <div class="stat-row" style="margin-bottom:6px;">
+        <span>U8 wo q (quantized weight output scale)</span>
+        <input id="u8-wo-q" type="number" value="0" min="0" style="width:80px;">
       </div>
       <div style="display:flex; gap:6px;">
         <button class="primary" onclick="applyHermesConfig()">▶ Apply</button>
@@ -232,9 +408,9 @@
       </div>
     </section>
 
-    <!-- 11. MCP Points -->
-    <section class="panel">
-      <h2>🔌 MCP Points</h2>
+    <!-- 11. MCP Points (inside Hermes agent) -->
+    <section class="panel" style="border-color: var(--purple);">
+      <h2 style="color: var(--purple);">🔌 MCP Points</h2>
       <div id="mcp-server-list" style="max-height:150px; overflow-y:auto;">
         <div class="stat-row" style="margin-bottom:6px;"><strong>No servers configured</strong></div>
       </div>
@@ -249,6 +425,7 @@
       </div>
     </section>
   </aside>
+
 
   <section id="workspace">
     <!-- Terminal (Hermes WebSocket) -->
