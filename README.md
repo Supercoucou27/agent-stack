@@ -1,20 +1,9 @@
-# Unified LLM Controller & Cluster Deck
+# Unified LLM Controller & Terminal Deck
 
 **Dashboard:** `http://127.0.0.1:8082/`
 **Backend:** FastAPI (uvicorn) on port 8082
 **LLM Backend:** llama-server on port 8080
-**Hermes Web Console:** port 8090 (separate)
-
-## Overview
-
-This is a local AI dashboard that controls:
-- **LLM Direct:** Chat with the local llama-server (Qwen3.8-27B) or remote Solar Mini 4 (free tier)
-- **Hardware Metrics:** GPU VRAM, CPU, RAM, and disk telemetry with real-time graphs
-- **LLM Configuration:** Context size, GPU layers, tensor split, threads, batch size, flash attention, temperature, max tokens
-- **Hermes Control:** Interactive terminal (WebSocket), status, yolo/guardrail, config
-- **Ollama Control:** Start, stop, restart, status check, sudo verification
-- **Claude 8082:** Agent chat, task management, auto-runtime
-- **MCP Points:** Configurable MCPs with stdio/HTTP transport
+**Hermes Agent:** Interactive CLI agent via WebSocket
 
 ## Architecture
 
@@ -58,9 +47,12 @@ This is a local AI dashboard that controls:
 ### 🖥️ Hardware Metrics
 - GPU VRAM allocation (RTX 2070, RTX 2060 SUPER)
 - Combined VRAM pool
-- CPU core load
-- Host RAM
-- Workspace disk
+- CPU core load (per-core)
+- Host RAM (total, used, available)
+- Workspace disk (used, free)
+- Network I/O (bytes sent/received)
+- Disk I/O (read/write bytes)
+- Process metrics (llama-server, hermes, python)
 
 ### 🤖 LLM Control
 - **Local llama-server:** Qwen3.8-27B-3.01bpw (GGUF)
@@ -71,33 +63,47 @@ This is a local AI dashboard that controls:
 
 ### ⚙️ LLM Configuration
 - Context size (ctx_size)
+- Context train (n_ctx_train)
 - GPU layers (n_gpu_layers)
 - Tensor split (tensor_split)
-- Threads
-- Batch size
-- Flash attention
+- Threads (n_threads)
+- Batch size (n_batch)
+- Upper batch (n_ubatch)
+- Past (n_past)
+- Seq parallel (n_seq_parallel)
+- MLock (mlock)
+- FP16 KV (f16_kv)
+- Logits all (logits_all)
+- Use mmap (use_mmap)
+- Use mlock (use_mlock)
+- NUMA (numa)
+- Main GPU (main_gpu)
+- Flash attention (flash_attn)
 - Temperature
-- Max tokens
+- Max tokens (max_tokens)
 
 ### 🧙 Hermes Control
-- Interactive WebSocket terminal
+- Interactive WebSocket terminal (`/ws/hermes`)
 - Status monitoring
-- Yolo mode
+- Yolo mode (toggle)
 - Guardrail toggle
-- Config via `hermes config set`
+- Config via `/api/hermes/config` (GET/POST)
+- System prompt
+- Reasoning effort (high/medium/low)
+- Terminal rows and columns
+- U8 quantization parameters (temperature, hallucination rate, verbosity, encoding, etc.)
 
-### 🤖 Ollama Control
-- Start, stop, restart
-- Status check
-- Sudo verification
-
-### 📊 Bonsai Cluster Control
-- 6-worker cluster orchestration
-- Objective-based task management
-- Status polling
-
-### 🔌 MCP Points
+### 🔌 MCP Points (inside Hermes agent)
 - List configured MCP servers
+- Add new MCP servers (stdio or HTTP transport)
+- Remove MCP servers
+- Toggle enable/disable
+- Reload MCP config
+
+### 📊 LLM Model Selection
+- Switch between local llama-server and remote Solar Mini 4 (free)
+- Choice on the frontend at `/llm` and `/`
+- Auto-detect model availability
 - Add new MCP servers (stdio or HTTP transport)
 - Toggle enable/disable
 - Reload MCP config
@@ -177,18 +183,6 @@ curl -X POST -H "Content-Type: application/json" \
 
 # Reload MCP config
 curl -X POST http://127.0.0.1:8082/api/mcp/reload
-```
-
-### Ollama Control
-```bash
-# Check Ollama status
-curl http://127.0.0.1:8082/api/ollama/status
-
-# Start Ollama
-curl -X POST http://127.0.0.1:8082/api/ollama/start
-
-# Stop Ollama
-curl -X POST http://127.0.0.1:8082/api/ollama/stop
 ```
 
 ## API Endpoints
