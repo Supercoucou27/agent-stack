@@ -46,6 +46,7 @@
 
 ### 🖥️ Hardware Metrics
 - GPU VRAM allocation (RTX 2070, RTX 2060 SUPER)
+- GPU power usage (watts)
 - Combined VRAM pool
 - CPU core load (per-core)
 - Host RAM (total, used, available)
@@ -229,8 +230,10 @@ agent-stack/
 | Port | Service |
 |---|---|
 | 8080 | llama-server (llama.cpp) |
-| 8082 | **Dashboard** (fastapi / web_app.py) |
-| 8090 | Hermes web console |
+| 8082 | **Dashboard** (fastapi / web_app.py) — admin API + WebSocket |
+| 8090 | Hermes web console (optional) |
+
+> **Note:** The dashboard on 8082 should be behind a reverse proxy (Nginx/Caddy) in production.
 
 ## Troubleshooting
 
@@ -249,11 +252,23 @@ agent-stack/
 - Check the hermes binary: `which hermes`
 - Check the WebSocket connection in the browser console
 
-### Solar Mini 4 API key
-The Solar Mini 4 (free tier) requires a Nous research API key.
-```bash
-export SOLAR_API_KEY=your_api_key_here
-```
+### Security Configuration
+The WebSocket endpoint (/ws/hermes) requires authentication:
+
+1. Set a strong token: `export HERMES_WS_TOKEN=$(openssl rand -hex 32)`
+2. Restrict origins: `export HERMES_ALLOWED_ORIGINS=http://your-domain.com`
+
+The token is stored in `.hermes/secrets.json` and `.hermes/.env`.
+
+### Reverse Proxy (Recommended)
+Place a reverse proxy (Nginx/Caddy) in front of the dashboard:
+- Enforce TLS (HTTPS)
+- Add rate limiting
+- Authenticate admin API endpoints
+- Block direct access from untrusted origins
+
+### Security Policy
+See [SECURITY.md](SECURITY.md) for the full security policy.
 
 ## License
 
